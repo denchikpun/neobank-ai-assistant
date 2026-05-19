@@ -16,7 +16,7 @@ from telegram.ext import (
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_TOKEN = 8994016838:AAEV3yNgxcWl9eEZ28SYWeJ6v9nYBjoSjHI
 GEMINI_KEY     = os.environ["GEMINI_API_KEY"]
 ALLOWED_USERS  = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
 
