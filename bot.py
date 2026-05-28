@@ -17,7 +17,7 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = "8994016838:AAEV3yNgxcWl9eEZ28SYWeJ6v9nYBjoSjHI"
-GEMINI_KEY     = "AIzaSyBNS31wlzVFJByLDedVq4-cG7Cbs28ExyY"
+GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 ALLOWED_USERS  = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
 
 genai.configure(api_key=GEMINI_KEY)
