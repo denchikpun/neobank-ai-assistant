@@ -340,11 +340,18 @@ async def receive_focus(update, context):
             [InlineKeyboardButton("🔄 Change folder", callback_data="change_folder"),
              InlineKeyboardButton("❌ Discard",        callback_data="discard")],
         ]
-        await update.message.reply_text(
-            format_preview(data, source) + "\n\n─────────────────────\n✅ Save to Google Drive?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        preview = format_preview(data, source) + "\n\n─────────────────────\n✅ Save to Google Drive?"
+        try:
+            await update.message.reply_text(
+                preview, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            # Markdown failed — resend as plain text so the buttons still work
+            plain = re.sub(r"[*_`\[\]]", "", preview)
+            await update.message.reply_text(
+                plain, reply_markup=InlineKeyboardMarkup(keyboard)
+            )
 
     except json.JSONDecodeError:
         await update.message.reply_text("⚠️ Processing error. Please try again.")
@@ -384,11 +391,11 @@ async def button_callback(update, context):
 
         if drive_url:
             await query.message.reply_text(
-                f"✅ *Saved to Google Drive!*\n\n"
-                f"📁 `{folder}`\n"
-                f"📄 [{esc(title)}]({drive_url})\n\n"
-                f"_INDEX\\_Brief and CHANGELOG updated automatically._",
-                parse_mode="Markdown",
+                f"✅ Saved to Google Drive!\n\n"
+                f"📁 {folder}\n"
+                f"📄 {title}\n"
+                f"🔗 {drive_url}\n\n"
+                f"INDEX and CHANGELOG updated.",
                 disable_web_page_preview=True
             )
         else:
@@ -457,8 +464,8 @@ async def handle_score_edit(update, context):
         })
         if drive_url:
             await update.message.reply_text(
-                f"✅ *Saved!*\n📁 `{folder}`\n📄 [{esc(title)}]({drive_url})",
-                parse_mode="Markdown", disable_web_page_preview=True
+                f"✅ Saved!\n📁 {folder}\n📄 {title}\n🔗 {drive_url}",
+                disable_web_page_preview=True
             )
         else:
             await update.message.reply_text(f"⚠️ Drive error: {error}")
