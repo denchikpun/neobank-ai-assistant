@@ -187,11 +187,11 @@ def save_to_drive(data, source, content):
         logger.info(f"Apps Script response [{resp.status_code}]: {resp.text[:500]}")
         result = resp.json()
         if result.get("ok"):
-            return result.get("file_url"), None
+            return result.get("file_url"), result.get("file_id"), None
         else:
-            return None, result.get("error", "Unknown error from Apps Script")
+            return None, None, result.get("error", "Unknown error from Apps Script")
     except Exception as e:
-        return None, str(e)
+        return None, None, str(e)
 
 
 def esc(text):
@@ -237,7 +237,7 @@ async def start(update, context):
         "🔗 *Link* — article, YouTube, podcast\n"
         "📎 *File* — PDF, DOCX, TXT\n"
         "💬 *Text* — paste directly\n\n"
-        "/status · /list · /help",
+        "/status · /list · /undo · /rollback · /help",
         parse_mode="Markdown"
     )
 
@@ -287,6 +287,83 @@ async def list_docs(update, context):
         "📋 *Recent Documents*\n\n" + "\n\n".join(lines),
         parse_mode="Markdown", disable_web_page_preview=True
     )
+
+
+def rollback_in_drive(file_id):
+    """Ask Apps Script to move a document to _Archive."""
+    if not APPS_SCRIPT_URL:
+        return None, "Apps Script URL not configured"
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "rollback", "file_id": file_id
+        }, timeout=30)
+        logger.info(f"Rollback response [{resp.status_code}]: {resp.text[:300]}")
+        result = resp.json()
+        if result.get("ok"):
+            return result, None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+
+async def undo(update, context):
+    """Откатить последний созданный документ — переместить в _Archive."""
+    if not is_allowed(update.effective_user.id):
+        return
+    docs = context.bot_data.get("docs", [])
+    # ищем последний документ с file_id, который ещё не откатан
+    target = None
+    for d in reversed(docs):
+        if d.get("file_id") and not d.get("rolled_back"):
+            target = d
+            break
+    if not target:
+        await update.message.reply_text("Нечего откатывать — нет недавних сохранений с ID.")
+        return
+
+    await update.message.reply_text(f"↩️ Откатываю: {target.get('title','Untitled')}...")
+    result, error = rollback_in_drive(target["file_id"])
+    if result:
+        target["rolled_back"] = True
+        await update.message.reply_text(
+            f"✅ Откачено в _Archive\n"
+            f"📄 {result.get('title', target.get('title'))}\n"
+            f"📁 {result.get('from','—')} → _Archive\n\n"
+            f"Документ не удалён — его можно вернуть из _Archive.",
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(f"⚠️ Не удалось откатить: {error}")
+
+
+async def rollback(update, context):
+    """Откатить документ по ID: /rollback <file_id>"""
+    if not is_allowed(update.effective_user.id):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Использование: /rollback <ID документа>\n\n"
+            "ID можно взять из ссылки документа в INDEX или из /list."
+        )
+        return
+    file_id = args[0].strip()
+    await update.message.reply_text(f"↩️ Откатываю документ {file_id}...")
+    result, error = rollback_in_drive(file_id)
+    if result:
+        # пометить в истории если есть
+        for d in context.bot_data.get("docs", []):
+            if d.get("file_id") == file_id:
+                d["rolled_back"] = True
+        await update.message.reply_text(
+            f"✅ Откачено в _Archive\n"
+            f"📄 {result.get('title','—')}\n"
+            f"📁 {result.get('from','—')} → _Archive\n\n"
+            f"Документ не удалён — его можно вернуть из _Archive.",
+            disable_web_page_preview=True
+        )
+    else:
+        await update.message.reply_text(f"⚠️ Не удалось откатить: {error}")
 
 
 # ── Receive material ──────────────────────────────────────
@@ -394,7 +471,7 @@ async def button_callback(update, context):
     if query.data == "confirm_save":
         await query.message.reply_text("💾 Saving to Google Drive...")
 
-        drive_url, error = save_to_drive(pd, src, pc)
+        drive_url, file_id, error = save_to_drive(pd, src, pc)
 
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
@@ -407,6 +484,7 @@ async def button_callback(update, context):
             "date":        pd.get("date", datetime.now().strftime("%Y-%m-%d")),
             "source":      src,
             "drive_url":   drive_url or "",
+            "file_id":     file_id or "",
         })
 
         if drive_url:
@@ -473,14 +551,14 @@ async def handle_score_edit(update, context):
         src = context.user_data.get("pending_source", "Unknown")
         pc  = context.user_data.get("pending_content", "")
         await update.message.reply_text("💾 Saving to Google Drive...")
-        drive_url, error = save_to_drive(pd, src, pc)
+        drive_url, file_id, error = save_to_drive(pd, src, pc)
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
         context.bot_data.setdefault("docs", []).append({
             "title": title, "folder": folder,
             "importance": pd.get("importance", 5), "credibility": pd.get("credibility", 5),
             "date": pd.get("date", datetime.now().strftime("%Y-%m-%d")),
-            "source": src, "drive_url": drive_url or "",
+            "source": src, "drive_url": drive_url or "", "file_id": file_id or "",
         })
         if drive_url:
             await update.message.reply_text(
@@ -508,6 +586,8 @@ def main():
     app.add_handler(CommandHandler("help",   help_cmd))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("list",   list_docs))
+    app.add_handler(CommandHandler("undo",     undo))
+    app.add_handler(CommandHandler("rollback", rollback))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_score_edit))
