@@ -171,25 +171,34 @@ def save_to_drive(data, source, content):
         return None, str(e)
  
  
+def esc(text):
+    """Escape Telegram Markdown (legacy) special chars in dynamic text."""
+    if text is None:
+        return ""
+    for ch in ("_", "*", "`", "["):
+        text = str(text).replace(ch, "\\" + ch)
+    return text
+ 
+ 
 def format_preview(data, source):
     tags     = "  ".join(data.get("hashtags", []))
-    insights = "\n".join([f"  {i+1}. {t}" for i, t in enumerate(data.get("key_insights", []))])
+    insights = "\n".join([f"  {i+1}. {esc(t)}" for i, t in enumerate(data.get("key_insights", []))])
     imp      = data.get("importance",  0)
     cred     = data.get("credibility", 0)
     return (
-        f"📄 *{data.get('title','Untitled')}*\n\n"
+        f"📄 *{esc(data.get('title','Untitled'))}*\n\n"
         f"📁 *Folder:* `{data.get('folder','—')}`\n"
         f"📅 {data.get('date','—')}  |  🏷 {data.get('version','V1.0')}\n\n"
         f"─────────────────────\n"
-        f"📝 *Summary*\n{data.get('summary','—')}\n\n"
+        f"📝 *Summary*\n{esc(data.get('summary','—'))}\n\n"
         f"💡 *Key Insights*\n{insights}\n\n"
-        f"🏷 *Hashtags*\n{tags}\n\n"
+        f"🏷 *Hashtags*\n{esc(tags)}\n\n"
         f"─────────────────────\n"
         f"⭐️ *Importance:* {imp}/10  {'🟠'*imp}{'⚪️'*(10-imp)}\n"
-        f"_{data.get('importance_reason','')}_\n\n"
+        f"_{esc(data.get('importance_reason',''))}_\n\n"
         f"✅ *Credibility:* {cred}/10  {'🔵'*cred}{'⚪️'*(10-cred)}\n"
-        f"_{data.get('credibility_reason','')}_\n\n"
-        f"🔗 *Source:* {source}"
+        f"_{esc(data.get('credibility_reason',''))}_\n\n"
+        f"🔗 *Source:* {esc(source)}"
     )
  
  
@@ -374,7 +383,7 @@ async def button_callback(update, context):
             await query.message.reply_text(
                 f"✅ *Saved to Google Drive!*\n\n"
                 f"📁 `{folder}`\n"
-                f"📄 [{title}]({drive_url})\n\n"
+                f"📄 [{esc(title)}]({drive_url})\n\n"
                 f"_INDEX\\_Brief and CHANGELOG updated automatically._",
                 parse_mode="Markdown",
                 disable_web_page_preview=True
@@ -445,7 +454,7 @@ async def handle_score_edit(update, context):
         })
         if drive_url:
             await update.message.reply_text(
-                f"✅ *Saved!*\n📁 `{folder}`\n📄 [{title}]({drive_url})",
+                f"✅ *Saved!*\n📁 `{folder}`\n📄 [{esc(title)}]({drive_url})",
                 parse_mode="Markdown", disable_web_page_preview=True
             )
         else:
