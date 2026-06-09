@@ -60,8 +60,28 @@ def fetch_url_content(url):
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TrustMeBot/1.0)"}
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
-        text = re.sub(r"<script[^>]*>.*?</script>", "", resp.text, flags=re.DOTALL)
-        text = re.sub(r"<style[^>]*>.*?</style>",   "", text,      flags=re.DOTALL)
+        html = resp.text
+
+        # 1) Try trafilatura — extracts main article, strips nav/footer/menus
+        try:
+            import trafilatura
+            extracted = trafilatura.extract(
+                html,
+                include_comments=False,
+                include_tables=False,
+                no_fallback=False,
+            )
+            if extracted and len(extracted.strip()) > 200:
+                return extracted.strip()[:40000]
+        except Exception as e:
+            logger.info(f"trafilatura failed, falling back: {e}")
+
+        # 2) Fallback — crude tag strip (last resort)
+        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
+        text = re.sub(r"<style[^>]*>.*?</style>",   "", text, flags=re.DOTALL)
+        text = re.sub(r"<nav[^>]*>.*?</nav>",       "", text, flags=re.DOTALL)
+        text = re.sub(r"<footer[^>]*>.*?</footer>", "", text, flags=re.DOTALL)
+        text = re.sub(r"<header[^>]*>.*?</header>", "", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+",     " ", text).strip()
         return text[:40000]
@@ -151,7 +171,7 @@ def save_to_drive(data, source, content):
         "folder":      data.get("folder", "Knowledge/Market"),
         "content":     f"SUMMARY:\n{data.get('summary','')}\n\nKEY INSIGHTS:\n" +
                        "\n".join([f"{i+1}. {t}" for i,t in enumerate(data.get('key_insights',[]))]) +
-                       f"\n\nSOURCE CONTENT:\n{content[:15000]}",
+                       f"\n\nSOURCE CONTENT (cleaned excerpt):\n{content[:6000]}",
         "source":      source,
         "importance":  data.get("importance", 5),
         "credibility": data.get("credibility", 5),
