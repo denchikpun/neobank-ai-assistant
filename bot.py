@@ -6,7 +6,7 @@ import tempfile
 import requests
 from datetime import datetime
  
-import google.generativeai as genai
+from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
@@ -17,13 +17,13 @@ logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=lo
 logger = logging.getLogger(__name__)
  
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
-GEMINI_KEY      = os.environ["GEMINI_API_KEY"]
+GROQ_KEY        = os.environ["GROQ_API_KEY"]
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 SCRIPT_TOKEN    = os.environ.get("SCRIPT_TOKEN", "TRUSTME_SECRET_2025")
 ALLOWED_USERS   = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
  
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+groq_client = Groq(api_key=GROQ_KEY)
+MODEL = "llama-3.3-70b-versatile"
  
 WAITING_FOCUS = 1
  
@@ -92,7 +92,7 @@ def extract_file_content(tmp_path, filename):
         return f"[Could not extract content: {e}]"
  
  
-def process_with_gemini(content, source, focus):
+def process_with_ai(content, source, focus):
     pages  = max(1, len(content.split()) // 250)
     n_tags = "15-20" if pages >= 100 else "10-15" if pages >= 50 else "5-10" if pages >= 10 else "3-5"
     today  = datetime.now().strftime("%Y-%m-%d")
@@ -126,8 +126,13 @@ Return ONLY this JSON:
  
 Rules: importance 9-10 only for Sharia/strategy/foundational; credibility 4-6 for interviews/podcasts/social; 3-7 insights; all English."""
  
-    response = model.generate_content(prompt)
-    raw = response.text.strip()
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+        response_format={"type": "json_object"},
+    )
+    raw = response.choices[0].message.content.strip()
     raw = re.sub(r"^```json\s*", "", raw)
     raw = re.sub(r"^```\s*",     "", raw)
     raw = re.sub(r"\s*```$",     "", raw)
@@ -195,7 +200,7 @@ async def start(update, context):
         await update.message.reply_text("⛔️ Access restricted.")
         return
     await update.message.reply_text(
-        "👋 *NeoBank Knowledge Agent*\n_Powered by Gemini · Saves to Google Drive_\n\n"
+        "👋 *NeoBank Knowledge Agent*\n_Powered by Groq · Saves to Google Drive_\n\n"
         "Send me:\n"
         "🔗 *Link* — article, YouTube, podcast\n"
         "📎 *File* — PDF, DOCX, TXT\n"
@@ -286,7 +291,7 @@ async def receive_focus(update, context):
     if not is_allowed(update.effective_user.id):
         return ConversationHandler.END
     focus = "" if update.message.text.strip().startswith("/skip") else update.message.text.strip()
-    await update.message.reply_text("⏳ Analysing with Gemini...")
+    await update.message.reply_text("⏳ Analysing...")
  
     ptype  = context.user_data.get("pending_type")
     source = context.user_data.get("pending_source", "Unknown")
@@ -313,7 +318,7 @@ async def receive_focus(update, context):
             await update.message.reply_text("⚠️ Could not extract content. Try pasting text directly.")
             return ConversationHandler.END
  
-        data = process_with_gemini(content, source, focus)
+        data = process_with_ai(content, source, focus)
         context.user_data["pending_data"]    = data
         context.user_data["pending_content"] = content
  
@@ -467,7 +472,7 @@ def main():
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_score_edit))
-    logger.info("NeoBank Knowledge Bot (Phase 2 — Drive) starting...")
+    logger.info("NeoBank Knowledge Bot (Phase 2 — Groq + Drive) starting...")
     app.run_polling(drop_pending_updates=True)
  
 if __name__ == "__main__":
