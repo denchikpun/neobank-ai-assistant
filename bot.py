@@ -5,28 +5,28 @@ import logging
 import tempfile
 import requests
 from datetime import datetime
- 
+
 from groq import Groq
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters, ConversationHandler
 )
- 
+
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
- 
+
 TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
 GROQ_KEY        = os.environ["GROQ_API_KEY"]
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 SCRIPT_TOKEN    = os.environ.get("SCRIPT_TOKEN", "TRUSTME_SECRET_2025")
 ALLOWED_USERS   = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
- 
+
 groq_client = Groq(api_key=GROQ_KEY)
 MODEL = "llama-3.3-70b-versatile"
- 
+
 WAITING_FOCUS = 1
- 
+
 FOLDERS = {
     "Knowledge/Product":       "Product specs, PRD, roadmap, features, UX",
     "Knowledge/Sharia":        "Sharia standards, fatwa, AAOIFI, IFSB, halal screening",
@@ -47,14 +47,14 @@ FOLDERS = {
     "Company/HR":              "HR and org structure docs",
 }
 FOLDERS_TEXT = "\n".join([f"- {k}: {v}" for k, v in FOLDERS.items()])
- 
- 
+
+
 def is_allowed(user_id):
     if not ALLOWED_USERS or ALLOWED_USERS == {""}:
         return True
     return str(user_id) in ALLOWED_USERS
- 
- 
+
+
 def fetch_url_content(url):
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TrustMeBot/1.0)"}
@@ -67,8 +67,8 @@ def fetch_url_content(url):
         return text[:40000]
     except Exception as e:
         return f"[Could not fetch URL: {e}]"
- 
- 
+
+
 def extract_file_content(tmp_path, filename):
     fname = filename.lower()
     try:
@@ -90,25 +90,25 @@ def extract_file_content(tmp_path, filename):
             return f.read(40000)
     except Exception as e:
         return f"[Could not extract content: {e}]"
- 
- 
+
+
 def process_with_ai(content, source, focus):
     pages  = max(1, len(content.split()) // 250)
     n_tags = "15-20" if pages >= 100 else "10-15" if pages >= 50 else "5-10" if pages >= 10 else "3-5"
     today  = datetime.now().strftime("%Y-%m-%d")
- 
+
     prompt = f"""You are the NeoBank Knowledge Agent. Process this material and return ONLY valid JSON — no markdown, no explanation.
- 
+
 SOURCE: {source}
 USER FOCUS: {focus if focus else "General — extract what is most relevant for TrustMe Islamic Digital Bank"}
 DATE: {today}
- 
+
 MATERIAL:
 {content[:30000]}
- 
+
 Available folders:
 {FOLDERS_TEXT}
- 
+
 Return ONLY this JSON:
 {{
   "title": "concise English title",
@@ -123,9 +123,9 @@ Return ONLY this JSON:
   "version": "V1.0",
   "date": "{today}"
 }}
- 
+
 Rules: importance 9-10 only for Sharia/strategy/foundational; credibility 4-6 for interviews/podcasts/social; 3-7 insights; all English."""
- 
+
     response = groq_client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -137,13 +137,13 @@ Rules: importance 9-10 only for Sharia/strategy/foundational; credibility 4-6 fo
     raw = re.sub(r"^```\s*",     "", raw)
     raw = re.sub(r"\s*```$",     "", raw)
     return json.loads(raw)
- 
- 
+
+
 def save_to_drive(data, source, content):
     """Send document to Apps Script which saves it to Drive."""
     if not APPS_SCRIPT_URL:
         return None, "Apps Script URL not configured"
- 
+
     payload = {
         "token":       SCRIPT_TOKEN,
         "action":      "create_doc",
@@ -158,8 +158,10 @@ def save_to_drive(data, source, content):
         "date":        data.get("date", datetime.now().strftime("%Y-%m-%d")),
         "version":     data.get("version", "V1.0"),
         "hashtags":    data.get("hashtags", []),
+        "summary":     data.get("summary", ""),
+        "key_insights": data.get("key_insights", []),
     }
- 
+
     try:
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
         result = resp.json()
@@ -169,8 +171,8 @@ def save_to_drive(data, source, content):
             return None, result.get("error", "Unknown error from Apps Script")
     except Exception as e:
         return None, str(e)
- 
- 
+
+
 def esc(text):
     """Escape Telegram Markdown (legacy) special chars in dynamic text."""
     if text is None:
@@ -178,8 +180,8 @@ def esc(text):
     for ch in ("_", "*", "`", "["):
         text = str(text).replace(ch, "\\" + ch)
     return text
- 
- 
+
+
 def format_preview(data, source):
     tags     = "  ".join(data.get("hashtags", []))
     insights = "\n".join([f"  {i+1}. {esc(t)}" for i, t in enumerate(data.get("key_insights", []))])
@@ -200,10 +202,10 @@ def format_preview(data, source):
         f"_{esc(data.get('credibility_reason',''))}_\n\n"
         f"🔗 *Source:* {esc(source)}"
     )
- 
- 
+
+
 # ── Command handlers ──────────────────────────────────────
- 
+
 async def start(update, context):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("⛔️ Access restricted.")
@@ -217,10 +219,10 @@ async def start(update, context):
         "/status · /list · /help",
         parse_mode="Markdown"
     )
- 
+
 async def help_cmd(update, context):
     await start(update, context)
- 
+
 async def status(update, context):
     if not is_allowed(update.effective_user.id):
         return
@@ -245,7 +247,7 @@ async def status(update, context):
         f"📁 *Folders:*\n{fl}",
         parse_mode="Markdown"
     )
- 
+
 async def list_docs(update, context):
     if not is_allowed(update.effective_user.id):
         return
@@ -264,10 +266,10 @@ async def list_docs(update, context):
         "📋 *Recent Documents*\n\n" + "\n\n".join(lines),
         parse_mode="Markdown", disable_web_page_preview=True
     )
- 
- 
+
+
 # ── Receive material ──────────────────────────────────────
- 
+
 async def receive_message(update, context):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("⛔️ Access restricted.")
@@ -294,18 +296,18 @@ async def receive_message(update, context):
         parse_mode="Markdown"
     )
     return WAITING_FOCUS
- 
- 
+
+
 async def receive_focus(update, context):
     if not is_allowed(update.effective_user.id):
         return ConversationHandler.END
     focus = "" if update.message.text.strip().startswith("/skip") else update.message.text.strip()
     await update.message.reply_text("⏳ Analysing...")
- 
+
     ptype  = context.user_data.get("pending_type")
     source = context.user_data.get("pending_source", "Unknown")
     content = ""
- 
+
     try:
         if ptype == "url":
             await update.message.reply_text("🌐 Fetching URL...")
@@ -322,15 +324,15 @@ async def receive_focus(update, context):
             else:
                 content = extract_file_content(tmp_path, context.user_data.get("pending_file_name", "file.txt"))
             os.unlink(tmp_path)
- 
+
         if len(content) < 50:
             await update.message.reply_text("⚠️ Could not extract content. Try pasting text directly.")
             return ConversationHandler.END
- 
+
         data = process_with_ai(content, source, focus)
         context.user_data["pending_data"]    = data
         context.user_data["pending_content"] = content
- 
+
         keyboard = [
             [InlineKeyboardButton("✅ Save to Drive", callback_data="confirm_save"),
              InlineKeyboardButton("✏️ Edit scores",   callback_data="edit_scores")],
@@ -342,33 +344,33 @@ async def receive_focus(update, context):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
- 
+
     except json.JSONDecodeError:
         await update.message.reply_text("⚠️ Processing error. Please try again.")
     except Exception as e:
         logger.error(e)
         await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
- 
+
     return ConversationHandler.END
- 
- 
+
+
 # ── Callback handlers ─────────────────────────────────────
- 
+
 async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
     pd  = context.user_data.get("pending_data", {})
     pc  = context.user_data.get("pending_content", "")
     src = context.user_data.get("pending_source", "Unknown")
- 
+
     if query.data == "confirm_save":
         await query.message.reply_text("💾 Saving to Google Drive...")
- 
+
         drive_url, error = save_to_drive(pd, src, pc)
- 
+
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
- 
+
         context.bot_data.setdefault("docs", []).append({
             "title":       title,
             "folder":      folder,
@@ -378,7 +380,7 @@ async def button_callback(update, context):
             "source":      src,
             "drive_url":   drive_url or "",
         })
- 
+
         if drive_url:
             await query.message.reply_text(
                 f"✅ *Saved to Google Drive!*\n\n"
@@ -394,32 +396,32 @@ async def button_callback(update, context):
                 f"Document processed but not saved to Drive. Check Apps Script configuration.",
                 parse_mode="Markdown"
             )
- 
+
         await query.edit_message_reply_markup(reply_markup=None)
         context.user_data.clear()
- 
+
     elif query.data == "discard":
         await query.edit_message_text("❌ Discarded.")
         context.user_data.clear()
- 
+
     elif query.data == "edit_scores":
         await query.message.reply_text(
             f"✏️ Send: `importance 8` or `credibility 6`\n\n"
             f"Current — ⭐️{pd.get('importance','—')}/10  ✅{pd.get('credibility','—')}/10",
             parse_mode="Markdown"
         )
- 
+
     elif query.data == "change_folder":
         kb = [[InlineKeyboardButton(f, callback_data=f"folder_{f}")] for f in FOLDERS]
         await query.message.reply_text("📁 *Choose folder:*", parse_mode="Markdown",
                                         reply_markup=InlineKeyboardMarkup(kb))
- 
+
     elif query.data.startswith("folder_"):
         context.user_data["pending_data"]["folder"] = query.data[7:]
         await query.edit_message_text(f"📁 Folder: `{query.data[7:]}`\n\nSend `confirm` to save.",
                                        parse_mode="Markdown")
- 
- 
+
+
 async def handle_score_edit(update, context):
     if not is_allowed(update.effective_user.id):
         return
@@ -460,8 +462,8 @@ async def handle_score_edit(update, context):
         else:
             await update.message.reply_text(f"⚠️ Drive error: {error}")
         context.user_data.clear()
- 
- 
+
+
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     conv = ConversationHandler(
@@ -483,6 +485,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_score_edit))
     logger.info("NeoBank Knowledge Bot (Phase 2 — Groq + Drive) starting...")
     app.run_polling(drop_pending_updates=True)
- 
+
 if __name__ == "__main__":
     main()
