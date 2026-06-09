@@ -23,7 +23,7 @@ SCRIPT_TOKEN    = os.environ.get("SCRIPT_TOKEN", "TRUSTME_SECRET_2025")
 ALLOWED_USERS   = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
  
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
  
 WAITING_FOCUS = 1
  
