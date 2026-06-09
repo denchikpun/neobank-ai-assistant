@@ -164,6 +164,7 @@ def save_to_drive(data, source, content):
 
     try:
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
+        logger.info(f"Apps Script response [{resp.status_code}]: {resp.text[:500]}")
         result = resp.json()
         if result.get("ok"):
             return result.get("file_url"), None
