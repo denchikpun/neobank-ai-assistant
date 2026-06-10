@@ -195,7 +195,7 @@ def save_to_drive(data, source, content):
 
 
 def fetch_index_list():
-    """Получить список всех документов из INDEX через Apps Script."""
+    """Fetch the list of all documents from INDEX via Apps Script."""
     try:
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "list_index"
@@ -209,7 +209,7 @@ def fetch_index_list():
 
 
 def fetch_docs_content(file_ids):
-    """Получить полный текст документов по списку ID."""
+    """Fetch the full text of documents by a list of IDs."""
     try:
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "read_docs", "file_ids": file_ids
@@ -223,21 +223,21 @@ def fetch_docs_content(file_ids):
 
 
 def pick_relevant_docs(question, index_docs):
-    """Шаг 1: Groq выбирает релевантные документы по списку INDEX."""
+    """Step 1: Groq selects relevant documents from the INDEX list."""
     catalog = "\n".join([
         f"{i+1}. [{d.get('folder','')}] {d.get('title','')} (id: {d.get('file_id','')}) {d.get('scores','')}"
         for i, d in enumerate(index_docs) if d.get('file_id')
     ])
-    prompt = f"""Ты — поисковый помощник по базе знаний TrustMe. Вопрос пользователя:
+    prompt = f"""You are a search assistant for the TrustMe knowledge base. User question:
 "{question}"
 
-Вот каталог документов (номер, папка, название, id):
+Here is the document catalog (number, folder, title, id):
 {catalog}
 
-Выбери до 3 НАИБОЛЕЕ релевантных документов для ответа на вопрос.
-Верни ТОЛЬКО JSON без пояснений:
-{{"file_ids": ["id1", "id2"], "reason": "кратко почему"}}
-Если ничего не подходит — верни {{"file_ids": [], "reason": "..."}}."""
+Select up to 3 MOST relevant documents to answer the question.
+Return ONLY JSON, no explanation:
+{{"file_ids": ["id1", "id2"], "reason": "briefly why"}}
+If nothing fits — return {{"file_ids": [], "reason": "..."}}."""
 
     response = groq_client.chat.completions.create(
         model=MODEL,
@@ -251,20 +251,20 @@ def pick_relevant_docs(question, index_docs):
 
 
 def answer_from_docs(question, docs_content):
-    """Шаг 2: Groq отвечает на вопрос по полному тексту выбранных документов."""
+    """Step 2: Groq answers the question using the full text of selected documents."""
     context_text = ""
     for d in docs_content:
         if d.get("content"):
-            context_text += f"\n\n=== ДОКУМЕНТ: {d.get('title','')} ===\n{d['content']}"
+            context_text += f"\n\n=== DOCUMENT: {d.get('title','')} ===\n{d['content']}"
 
-    prompt = f"""Ты — ассистент базы знаний TrustMe. Ответь на вопрос пользователя, ОПИРАЯСЬ ТОЛЬКО на приведённые документы.
-Если в документах нет ответа — честно скажи об этом, не выдумывай.
+    prompt = f"""You are the TrustMe knowledge base assistant. Answer the user's question RELYING ONLY on the provided documents.
+If the documents don't contain the answer — say so honestly, don't make things up.
 
-ВОПРОС: {question}
+QUESTION: {question}
 
-ДОКУМЕНТЫ:{context_text}
+DOCUMENTS:{context_text}
 
-Ответь на русском, по делу. В конце укажи на какие документы ты опирался."""
+Answer in English, to the point. At the end, note which documents you relied on."""
 
     response = groq_client.chat.completions.create(
         model=MODEL,
@@ -275,62 +275,62 @@ def answer_from_docs(question, docs_content):
 
 
 async def ask_knowledge_base(update, context):
-    """Обработка вопроса 'Помоги, ...' — поиск и ответ по базе знаний."""
+    """Handle a 'Help, ...' question — search and answer from the knowledge base."""
     if not is_allowed(update.effective_user.id):
         return
     text = update.message.text.strip()
-    # убрать триггер 'Помоги' и знаки в начале
-    question = re.sub(r"^помоги[,!\s]*", "", text, flags=re.IGNORECASE).strip()
+    # remove the 'Help' trigger and leading punctuation
+    question = re.sub(r"^help[,!\s]*", "", text, flags=re.IGNORECASE).strip()
     if not question:
         await update.message.reply_text(
-            "Напиши вопрос после «Помоги», например:\n"
-            "«Помоги, какие у нас есть материалы по KYC?»"
+            "Type a question after «Help», for example:\n"
+            "«Help, what materials do we have on KYC?»"
         )
         return
 
-    await update.message.reply_text("🔎 Ищу в базе знаний...")
+    await update.message.reply_text("🔎 Searching the knowledge base...")
 
-    # Шаг 1 — получить каталог
+    # Step 1 — get the catalog
     index_docs, error = fetch_index_list()
     if error:
-        await update.message.reply_text(f"⚠️ Не удалось прочитать INDEX: {error}")
+        await update.message.reply_text(f"⚠️ Could not read INDEX: {error}")
         return
     if not index_docs:
-        await update.message.reply_text("База знаний пока пуста — нечего искать.")
+        await update.message.reply_text("The knowledge base is empty — nothing to search.")
         return
 
-    # Шаг 2 — выбрать релевантные
+    # Step 2 — pick relevant
     try:
         pick = pick_relevant_docs(question, index_docs)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка поиска: {str(e)[:200]}")
+        await update.message.reply_text(f"⚠️ Search error: {str(e)[:200]}")
         return
 
     file_ids = pick.get("file_ids", [])
     if not file_ids:
         await update.message.reply_text(
-            "По этому запросу в базе ничего релевантного не нашлось.\n"
+            "Nothing relevant found in the base for this query.\n"
             f"_{pick.get('reason','')}_",
             parse_mode="Markdown"
         )
         return
 
-    await update.message.reply_text(f"📖 Читаю {len(file_ids)} документ(ов)...")
+    await update.message.reply_text(f"📖 Reading {len(file_ids)} document(s)...")
 
-    # Шаг 3 — прочитать полный текст
+    # Step 3 — read full text
     docs_content, error = fetch_docs_content(file_ids)
     if error:
-        await update.message.reply_text(f"⚠️ Не удалось прочитать документы: {error}")
+        await update.message.reply_text(f"⚠️ Could not read documents: {error}")
         return
 
-    # Шаг 4 — ответить
+    # Step 4 — answer
     try:
         answer = answer_from_docs(question, docs_content)
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Ошибка генерации ответа: {str(e)[:200]}")
+        await update.message.reply_text(f"⚠️ Answer generation error: {str(e)[:200]}")
         return
 
-    # ссылки на источники
+    # source references
     sources = "\n".join([
         f"• {d.get('title','')}" for d in docs_content if d.get("content")
     ])
@@ -379,18 +379,18 @@ async def start(update, context):
         return
     await update.message.reply_text(
         "👋 *NeoBank Knowledge Agent*\n"
-        "_База знаний TrustMe · Groq + Google Drive_\n\n"
-        "Я помогаю собирать и хранить знания команды в Google Drive.\n\n"
-        "*Что я умею:*\n"
-        "📎 Принять ссылку, файл или текст\n"
-        "🧠 Проанализировать и разложить по папкам\n"
-        "🗂 Обновить индексы и журнал изменений\n"
-        "↩️ Откатить ошибочное сохранение\n\n"
-        "*Как начать:* просто пришли мне ссылку, файл или текст.\n\n"
-        "💡 Чтобы спросить базу знаний — начни сообщение со слова «Помоги»:\n"
-        "_«Помоги, какие у нас материалы по KYC?»_\n\n"
-        "Полная инструкция — /help\n"
-        "Список команд — кнопка «☰» или «/» слева от поля ввода.",
+        "_TrustMe Knowledge Base · Groq + Google Drive_\n\n"
+        "I help collect and store the team's knowledge in Google Drive.\n\n"
+        "*What I can do:*\n"
+        "📎 Accept a link, file, or text\n"
+        "🧠 Analyze and sort it into folders\n"
+        "🗂 Update indexes and changelog\n"
+        "↩️ Roll back a mistaken save\n\n"
+        "*How to start:* just send me a link, file, or text.\n\n"
+        "💡 To ask the knowledge base — start your message with the word «Help»:\n"
+        "_«Help, what materials do we have on KYC?»_\n\n"
+        "Full guide — /help\n"
+        "Command list — the «☰» or «/» button next to the input field.",
         parse_mode="Markdown"
     )
 
@@ -399,41 +399,41 @@ async def help_cmd(update, context):
     if not is_allowed(update.effective_user.id):
         return
     await update.message.reply_text(
-        "📖 *Инструкция NeoBank Knowledge Agent*\n\n"
-        "*1. Как добавить материал*\n"
-        "Пришли боту:\n"
-        "🔗 ссылку — статья, страница, пост\n"
-        "📎 файл — PDF, DOCX, TXT\n"
-        "💬 текст — просто напиши или вставь\n\n"
-        "*2. Что произойдёт*\n"
-        "Бот спросит, на чём сфокусироваться. Дальше два пути:\n"
-        "• Напиши фокус или /skip → бот проанализирует через ИИ, "
-        "предложит папку, теги и оценки, покажет превью\n"
-        "• Кнопка «📥 Сохранить без анализа» → выберешь папку, "
-        "файл ляжет как есть, без обработки\n\n"
-        "*3. Подтверждение*\n"
-        "В превью можно: сохранить, изменить папку, поправить оценки или отменить.\n"
-        "После сохранения документ попадает в нужную папку Drive, "
-        "а индексы и журнал обновляются автоматически.\n\n"
-        "*4. Откат*\n"
-        "/undo — откатить последнее сохранение\n"
-        "/rollback <ID> — откатить документ по ID (из ссылки или /list)\n"
-        "Откатанные документы уходят в _Archive — не удаляются, их можно вернуть.\n\n"
-        "*5. Вопросы к базе знаний*\n"
-        "Начни сообщение со слова «Помоги» — бот найдёт нужные документы и ответит по их содержимому:\n"
-        "_«Помоги, какие потенциальные партнёры по KYC у нас есть?»_\n"
-        "_«Помоги, найди материалы по MoonPay»_\n\n"
-        "*6. Команды*\n"
-        "/start — приветствие\n"
-        "/help — эта инструкция\n"
-        "/status — статистика базы\n"
-        "/list — последние документы\n"
-        "/undo — откат последнего\n"
-        "/rollback — откат по ID\n\n"
-        "*Правила хранения:*\n"
-        "• Старое не удаляется — уходит в _Archive\n"
-        "• Каждое действие фиксируется в CHANGELOG\n"
-        "• Имя файла: Название_Версия_Дата",
+        "📖 *NeoBank Knowledge Agent — Guide*\n\n"
+        "*1. How to add material*\n"
+        "Send the bot:\n"
+        "🔗 a link — article, page, post\n"
+        "📎 a file — PDF, DOCX, TXT\n"
+        "💬 text — just type or paste\n\n"
+        "*2. What happens*\n"
+        "The bot will ask what to focus on. Then two paths:\n"
+        "• Type a focus or /skip → the bot analyzes via AI, "
+        "suggests a folder, tags and scores, shows a preview\n"
+        "• «📥 Save without analysis» button → pick a folder, "
+        "the file is stored as-is, unprocessed\n\n"
+        "*3. Confirmation*\n"
+        "In the preview you can: save, change folder, adjust scores, or discard.\n"
+        "After saving, the document goes to the right Drive folder, "
+        "and the indexes and changelog update automatically.\n\n"
+        "*4. Rollback*\n"
+        "/undo — roll back the last save\n"
+        "/rollback <ID> — roll back a document by ID (from a link or /list)\n"
+        "Rolled-back documents go to _Archive — they are not deleted and can be restored.\n\n"
+        "*5. Questions to the knowledge base*\n"
+        "Start your message with the word «Help» — the bot finds the relevant documents and answers from their content:\n"
+        "_«Help, what potential KYC partners do we have?»_\n"
+        "_«Help, find materials on MoonPay»_\n\n"
+        "*6. Commands*\n"
+        "/start — welcome\n"
+        "/help — this guide\n"
+        "/status — knowledge base stats\n"
+        "/list — recent documents\n"
+        "/undo — roll back the last save\n"
+        "/rollback — roll back by ID\n\n"
+        "*Storage rules:*\n"
+        "• Old content is never deleted — it moves to _Archive\n"
+        "• Every action is logged in CHANGELOG\n"
+        "• File name: Title_Version_Date",
         parse_mode="Markdown"
     )
 
@@ -483,7 +483,7 @@ async def list_docs(update, context):
 
 
 def save_raw_to_drive(folder, title, text_content, source):
-    """Сохранить документ в Drive без AI-анализа."""
+    """Save a document to Drive without AI analysis."""
     if not APPS_SCRIPT_URL:
         return None, "Apps Script URL not configured"
     payload = {
@@ -491,14 +491,14 @@ def save_raw_to_drive(folder, title, text_content, source):
         "action": "create_doc",
         "title": title,
         "folder": folder,
-        "content": text_content or "(файл сохранён без обработки)",
+        "content": text_content or "(file saved without processing)",
         "source": source,
         "importance": 0,
         "credibility": 0,
         "date": datetime.now().strftime("%Y-%m-%d"),
         "version": "V1.0",
         "hashtags": ["#raw_unprocessed"],
-        "summary": "Сохранено без анализа",
+        "summary": "Saved without analysis",
         "key_insights": [],
     }
     try:
@@ -530,68 +530,68 @@ def rollback_in_drive(file_id):
 
 
 async def undo(update, context):
-    """Откатить последний созданный документ — переместить в _Archive."""
+    """Roll back the last created document — move it to _Archive."""
     if not is_allowed(update.effective_user.id):
         return
     docs = context.bot_data.get("docs", [])
-    # ищем последний документ с file_id, который ещё не откатан
+    # find the last document with a file_id that hasn't been rolled back yet
     target = None
     for d in reversed(docs):
         if d.get("file_id") and not d.get("rolled_back"):
             target = d
             break
     if not target:
-        await update.message.reply_text("Нечего откатывать — нет недавних сохранений с ID.")
+        await update.message.reply_text("Nothing to roll back — no recent saves with an ID.")
         return
 
-    await update.message.reply_text(f"↩️ Откатываю: {target.get('title','Untitled')}...")
+    await update.message.reply_text(f"↩️ Rolling back: {target.get('title','Untitled')}...")
     result, error = rollback_in_drive(target["file_id"])
     if result:
         target["rolled_back"] = True
         await update.message.reply_text(
-            f"✅ Откачено в _Archive\n"
+            f"✅ Rolled back to _Archive\n"
             f"📄 {result.get('title', target.get('title'))}\n"
             f"📁 {result.get('from','—')} → _Archive\n\n"
-            f"Документ не удалён — его можно вернуть из _Archive.",
+            f"The document is not deleted — it can be restored from _Archive.",
             disable_web_page_preview=True
         )
     else:
-        await update.message.reply_text(f"⚠️ Не удалось откатить: {error}")
+        await update.message.reply_text(f"⚠️ Could not roll back: {error}")
 
 
 async def rollback(update, context):
-    """Откатить документ по ID: /rollback <file_id>"""
+    """Roll back a document by ID: /rollback <file_id>"""
     if not is_allowed(update.effective_user.id):
         return
     args = context.args
     if not args:
         await update.message.reply_text(
-            "Использование: /rollback <ID документа>\n\n"
-            "ID можно взять из ссылки документа в INDEX или из /list."
+            "Usage: /rollback <document ID>\n\n"
+            "The ID can be taken from the document link in INDEX or from /list."
         )
         return
     raw = args[0].strip()
-    # убрать угловые скобки, кавычки, пробелы
+    # remove angle brackets, quotes, spaces
     raw = raw.strip("<>\"' ")
-    # если вставили целую ссылку — вытащить ID из /d/.../ или ?id=
+    # if a full link was pasted — extract the ID from /d/.../ or ?id=
     m = re.search(r"/d/([a-zA-Z0-9_-]+)", raw) or re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
     file_id = m.group(1) if m else raw
-    await update.message.reply_text(f"↩️ Откатываю документ {file_id}...")
+    await update.message.reply_text(f"↩️ Rolling back document {file_id}...")
     result, error = rollback_in_drive(file_id)
     if result:
-        # пометить в истории если есть
+        # mark in history if present
         for d in context.bot_data.get("docs", []):
             if d.get("file_id") == file_id:
                 d["rolled_back"] = True
         await update.message.reply_text(
-            f"✅ Откачено в _Archive\n"
+            f"✅ Rolled back to _Archive\n"
             f"📄 {result.get('title','—')}\n"
             f"📁 {result.get('from','—')} → _Archive\n\n"
-            f"Документ не удалён — его можно вернуть из _Archive.",
+            f"The document is not deleted — it can be restored from _Archive.",
             disable_web_page_preview=True
         )
     else:
-        await update.message.reply_text(f"⚠️ Не удалось откатить: {error}")
+        await update.message.reply_text(f"⚠️ Could not roll back: {error}")
 
 
 # ── Receive material ──────────────────────────────────────
@@ -617,11 +617,11 @@ async def receive_message(update, context):
     else:
         await msg.reply_text("Please send a link, file, or text.")
         return
-    kb = [[InlineKeyboardButton("📥 Сохранить без анализа", callback_data="raw_save")]]
+    kb = [[InlineKeyboardButton("📥 Save without analysis", callback_data="raw_save")]]
     await msg.reply_text(
         "🎯 *What should I focus on?*\n\n"
-        "Напиши что важно для TrustMe, или /skip для анализа по умолчанию.\n"
-        "Либо сохрани файл как есть, без обработки:",
+        "Tell me what's important for TrustMe, or /skip for default analysis.\n"
+        "Or save the file as-is, without processing:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(kb)
     )
@@ -755,24 +755,24 @@ async def button_callback(update, context):
                                         reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data == "raw_save":
-        # сохранить без анализа — сначала выбор папки
+        # save without analysis — folder picker first
         kb = [[InlineKeyboardButton(f, callback_data=f"rawfolder_{f}")] for f in FOLDERS]
         await query.message.reply_text(
-            "📁 Выбери папку для сохранения файла без обработки:",
+            "📁 Choose a folder to save the file without processing:",
             reply_markup=InlineKeyboardMarkup(kb)
         )
 
     elif query.data.startswith("rawfolder_"):
         folder = query.data[len("rawfolder_"):]
-        await query.edit_message_text(f"📥 Сохраняю в {folder} без анализа...")
+        await query.edit_message_text(f"📥 Saving to {folder} without analysis...")
 
         ptype = context.user_data.get("pending_type")
         fname = context.user_data.get("pending_file_name", "")
         text_content = ""
         tg_file_id = context.user_data.get("pending_file_id")
 
-        # для текста/ссылки — сохраняем как текстовый документ;
-        # для файла — берём имя и содержимое как есть
+        # for text/link — save as a text document;
+        # for a file — take the name and content as-is
         if ptype == "text":
             text_content = context.user_data.get("pending_text", "")
             title = (text_content[:50] + "...") if len(text_content) > 50 else (text_content or "Note")
@@ -790,11 +790,11 @@ async def button_callback(update, context):
                 "drive_url": result.get("file_url", ""), "file_id": result.get("file_id", ""),
             })
             await query.message.reply_text(
-                f"✅ Сохранено без анализа\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
+                f"✅ Saved without analysis\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
                 disable_web_page_preview=True
             )
         else:
-            await query.message.reply_text(f"⚠️ Не удалось сохранить: {error}")
+            await query.message.reply_text(f"⚠️ Could not save: {error}")
         context.user_data.clear()
 
     elif query.data.startswith("folder_"):
@@ -846,14 +846,14 @@ async def handle_score_edit(update, context):
 
 
 async def setup_commands(app):
-    """Зарегистрировать меню команд (кнопка «/» в Telegram)."""
+    """Register the command menu (the «/» button in Telegram)."""
     await app.bot.set_my_commands([
-        BotCommand("start",    "Приветствие и обзор"),
-        BotCommand("help",     "Инструкция по работе"),
-        BotCommand("status",   "Статистика базы знаний"),
-        BotCommand("list",     "Последние документы"),
-        BotCommand("undo",     "Откатить последнее сохранение"),
-        BotCommand("rollback", "Откатить документ по ID"),
+        BotCommand("start",    "Welcome and overview"),
+        BotCommand("help",     "How to use the bot"),
+        BotCommand("status",   "Knowledge base stats"),
+        BotCommand("list",     "Recent documents"),
+        BotCommand("undo",     "Roll back the last save"),
+        BotCommand("rollback", "Roll back a document by ID"),
     ])
     logger.info("Bot command menu registered")
 
@@ -861,8 +861,8 @@ async def setup_commands(app):
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(setup_commands).build()
 
-    # «Помоги ...» — вопрос к базе знаний (не материал для сохранения)
-    pomogi_filter = filters.TEXT & filters.Regex(r"(?i)^\s*помоги")
+    # «Help ...» — a question to the knowledge base (not material to save)
+    pomogi_filter = filters.TEXT & filters.Regex(r"(?i)^\s*help")
 
     conv = ConversationHandler(
         entry_points=[
@@ -880,7 +880,7 @@ def main():
     app.add_handler(CommandHandler("list",   list_docs))
     app.add_handler(CommandHandler("undo",     undo))
     app.add_handler(CommandHandler("rollback", rollback))
-    # вопрос к базе — до conv, чтобы перехватить раньше
+    # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(button_callback))
