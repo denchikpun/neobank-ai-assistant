@@ -7,7 +7,7 @@ import requests
 from datetime import datetime
 
 from groq import Groq
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, CallbackQueryHandler,
     ContextTypes, filters, ConversationHandler
@@ -232,17 +232,58 @@ async def start(update, context):
         await update.message.reply_text("⛔️ Access restricted.")
         return
     await update.message.reply_text(
-        "👋 *NeoBank Knowledge Agent*\n_Powered by Groq · Saves to Google Drive_\n\n"
-        "Send me:\n"
-        "🔗 *Link* — article, YouTube, podcast\n"
-        "📎 *File* — PDF, DOCX, TXT\n"
-        "💬 *Text* — paste directly\n\n"
-        "/status · /list · /undo · /rollback · /help",
+        "👋 *NeoBank Knowledge Agent*\n"
+        "_База знаний TrustMe · Groq + Google Drive_\n\n"
+        "Я помогаю собирать и хранить знания команды в Google Drive.\n\n"
+        "*Что я умею:*\n"
+        "📎 Принять ссылку, файл или текст\n"
+        "🧠 Проанализировать и разложить по папкам\n"
+        "🗂 Обновить индексы и журнал изменений\n"
+        "↩️ Откатить ошибочное сохранение\n\n"
+        "*Как начать:* просто пришли мне ссылку, файл или текст.\n\n"
+        "Полная инструкция — /help\n"
+        "Список команд — кнопка «☰» или «/» слева от поля ввода.",
         parse_mode="Markdown"
     )
 
+
 async def help_cmd(update, context):
-    await start(update, context)
+    if not is_allowed(update.effective_user.id):
+        return
+    await update.message.reply_text(
+        "📖 *Инструкция NeoBank Knowledge Agent*\n\n"
+        "*1. Как добавить материал*\n"
+        "Пришли боту:\n"
+        "🔗 ссылку — статья, страница, пост\n"
+        "📎 файл — PDF, DOCX, TXT\n"
+        "💬 текст — просто напиши или вставь\n\n"
+        "*2. Что произойдёт*\n"
+        "Бот спросит, на чём сфокусироваться. Дальше два пути:\n"
+        "• Напиши фокус или /skip → бот проанализирует через ИИ, "
+        "предложит папку, теги и оценки, покажет превью\n"
+        "• Кнопка «📥 Сохранить без анализа» → выберешь папку, "
+        "файл ляжет как есть, без обработки\n\n"
+        "*3. Подтверждение*\n"
+        "В превью можно: сохранить, изменить папку, поправить оценки или отменить.\n"
+        "После сохранения документ попадает в нужную папку Drive, "
+        "а индексы и журнал обновляются автоматически.\n\n"
+        "*4. Откат*\n"
+        "/undo — откатить последнее сохранение\n"
+        "/rollback <ID> — откатить документ по ID (из ссылки или /list)\n"
+        "Откатанные документы уходят в _Archive — не удаляются, их можно вернуть.\n\n"
+        "*5. Команды*\n"
+        "/start — приветствие\n"
+        "/help — эта инструкция\n"
+        "/status — статистика базы\n"
+        "/list — последние документы\n"
+        "/undo — откат последнего\n"
+        "/rollback — откат по ID\n\n"
+        "*Правила хранения:*\n"
+        "• Старое не удаляется — уходит в _Archive\n"
+        "• Каждое действие фиксируется в CHANGELOG\n"
+        "• Имя файла: Название_Версия_Дата",
+        parse_mode="Markdown"
+    )
 
 async def status(update, context):
     if not is_allowed(update.effective_user.id):
@@ -652,8 +693,21 @@ async def handle_score_edit(update, context):
         context.user_data.clear()
 
 
+async def setup_commands(app):
+    """Зарегистрировать меню команд (кнопка «/» в Telegram)."""
+    await app.bot.set_my_commands([
+        BotCommand("start",    "Приветствие и обзор"),
+        BotCommand("help",     "Инструкция по работе"),
+        BotCommand("status",   "Статистика базы знаний"),
+        BotCommand("list",     "Последние документы"),
+        BotCommand("undo",     "Откатить последнее сохранение"),
+        BotCommand("rollback", "Откатить документ по ID"),
+    ])
+    logger.info("Bot command menu registered")
+
+
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).post_init(setup_commands).build()
     conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message),
