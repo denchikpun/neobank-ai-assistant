@@ -377,7 +377,12 @@ async def rollback(update, context):
             "ID можно взять из ссылки документа в INDEX или из /list."
         )
         return
-    file_id = args[0].strip()
+    raw = args[0].strip()
+    # убрать угловые скобки, кавычки, пробелы
+    raw = raw.strip("<>\"' ")
+    # если вставили целую ссылку — вытащить ID из /d/.../ или ?id=
+    m = re.search(r"/d/([a-zA-Z0-9_-]+)", raw) or re.search(r"[?&]id=([a-zA-Z0-9_-]+)", raw)
+    file_id = m.group(1) if m else raw
     await update.message.reply_text(f"↩️ Откатываю документ {file_id}...")
     result, error = rollback_in_drive(file_id)
     if result:
