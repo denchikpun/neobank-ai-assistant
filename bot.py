@@ -289,6 +289,36 @@ async def list_docs(update, context):
     )
 
 
+def save_raw_to_drive(folder, title, text_content, source):
+    """Сохранить документ в Drive без AI-анализа."""
+    if not APPS_SCRIPT_URL:
+        return None, "Apps Script URL not configured"
+    payload = {
+        "token": SCRIPT_TOKEN,
+        "action": "create_doc",
+        "title": title,
+        "folder": folder,
+        "content": text_content or "(файл сохранён без обработки)",
+        "source": source,
+        "importance": 0,
+        "credibility": 0,
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "version": "V1.0",
+        "hashtags": ["#raw_unprocessed"],
+        "summary": "Сохранено без анализа",
+        "key_insights": [],
+    }
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=30)
+        logger.info(f"Raw save response [{resp.status_code}]: {resp.text[:300]}")
+        result = resp.json()
+        if result.get("ok"):
+            return result, None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+
 def rollback_in_drive(file_id):
     """Ask Apps Script to move a document to _Archive."""
     if not APPS_SCRIPT_URL:
@@ -389,9 +419,13 @@ async def receive_message(update, context):
     else:
         await msg.reply_text("Please send a link, file, or text.")
         return
+    kb = [[InlineKeyboardButton("📥 Сохранить без анализа", callback_data="raw_save")]]
     await msg.reply_text(
-        "🎯 *What should I focus on?*\n\nTell me what's important for TrustMe, or /skip for default.",
-        parse_mode="Markdown"
+        "🎯 *What should I focus on?*\n\n"
+        "Напиши что важно для TrustMe, или /skip для анализа по умолчанию.\n"
+        "Либо сохрани файл как есть, без обработки:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb)
     )
     return WAITING_FOCUS
 
@@ -521,6 +555,49 @@ async def button_callback(update, context):
         kb = [[InlineKeyboardButton(f, callback_data=f"folder_{f}")] for f in FOLDERS]
         await query.message.reply_text("📁 *Choose folder:*", parse_mode="Markdown",
                                         reply_markup=InlineKeyboardMarkup(kb))
+
+    elif query.data == "raw_save":
+        # сохранить без анализа — сначала выбор папки
+        kb = [[InlineKeyboardButton(f, callback_data=f"rawfolder_{f}")] for f in FOLDERS]
+        await query.message.reply_text(
+            "📁 Выбери папку для сохранения файла без обработки:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif query.data.startswith("rawfolder_"):
+        folder = query.data[len("rawfolder_"):]
+        await query.edit_message_text(f"📥 Сохраняю в {folder} без анализа...")
+
+        ptype = context.user_data.get("pending_type")
+        fname = context.user_data.get("pending_file_name", "")
+        text_content = ""
+        tg_file_id = context.user_data.get("pending_file_id")
+
+        # для текста/ссылки — сохраняем как текстовый документ;
+        # для файла — берём имя и содержимое как есть
+        if ptype == "text":
+            text_content = context.user_data.get("pending_text", "")
+            title = (text_content[:50] + "...") if len(text_content) > 50 else (text_content or "Note")
+        elif ptype == "url":
+            text_content = context.user_data.get("pending_url", "")
+            title = "Link: " + text_content[:60]
+        else:
+            title = fname or "Uploaded file"
+
+        result, error = save_raw_to_drive(folder, title, text_content, src)
+        if result and result.get("ok"):
+            context.bot_data.setdefault("docs", []).append({
+                "title": title, "folder": folder, "importance": "—", "credibility": "—",
+                "date": datetime.now().strftime("%Y-%m-%d"), "source": src,
+                "drive_url": result.get("file_url", ""), "file_id": result.get("file_id", ""),
+            })
+            await query.message.reply_text(
+                f"✅ Сохранено без анализа\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
+                disable_web_page_preview=True
+            )
+        else:
+            await query.message.reply_text(f"⚠️ Не удалось сохранить: {error}")
+        context.user_data.clear()
 
     elif query.data.startswith("folder_"):
         context.user_data["pending_data"]["folder"] = query.data[7:]
