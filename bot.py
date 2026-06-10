@@ -194,6 +194,152 @@ def save_to_drive(data, source, content):
         return None, None, str(e)
 
 
+def fetch_index_list():
+    """Получить список всех документов из INDEX через Apps Script."""
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "list_index"
+        }, timeout=30)
+        result = resp.json()
+        if result.get("ok"):
+            return result.get("docs", []), None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+
+def fetch_docs_content(file_ids):
+    """Получить полный текст документов по списку ID."""
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "read_docs", "file_ids": file_ids
+        }, timeout=45)
+        result = resp.json()
+        if result.get("ok"):
+            return result.get("docs", []), None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+
+def pick_relevant_docs(question, index_docs):
+    """Шаг 1: Groq выбирает релевантные документы по списку INDEX."""
+    catalog = "\n".join([
+        f"{i+1}. [{d.get('folder','')}] {d.get('title','')} (id: {d.get('file_id','')}) {d.get('scores','')}"
+        for i, d in enumerate(index_docs) if d.get('file_id')
+    ])
+    prompt = f"""Ты — поисковый помощник по базе знаний TrustMe. Вопрос пользователя:
+"{question}"
+
+Вот каталог документов (номер, папка, название, id):
+{catalog}
+
+Выбери до 3 НАИБОЛЕЕ релевантных документов для ответа на вопрос.
+Верни ТОЛЬКО JSON без пояснений:
+{{"file_ids": ["id1", "id2"], "reason": "кратко почему"}}
+Если ничего не подходит — верни {{"file_ids": [], "reason": "..."}}."""
+
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.2,
+        response_format={"type": "json_object"},
+    )
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", raw)
+    return json.loads(raw)
+
+
+def answer_from_docs(question, docs_content):
+    """Шаг 2: Groq отвечает на вопрос по полному тексту выбранных документов."""
+    context_text = ""
+    for d in docs_content:
+        if d.get("content"):
+            context_text += f"\n\n=== ДОКУМЕНТ: {d.get('title','')} ===\n{d['content']}"
+
+    prompt = f"""Ты — ассистент базы знаний TrustMe. Ответь на вопрос пользователя, ОПИРАЯСЬ ТОЛЬКО на приведённые документы.
+Если в документах нет ответа — честно скажи об этом, не выдумывай.
+
+ВОПРОС: {question}
+
+ДОКУМЕНТЫ:{context_text}
+
+Ответь на русском, по делу. В конце укажи на какие документы ты опирался."""
+
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+    )
+    return response.choices[0].message.content.strip()
+
+
+async def ask_knowledge_base(update, context):
+    """Обработка вопроса 'Помоги, ...' — поиск и ответ по базе знаний."""
+    if not is_allowed(update.effective_user.id):
+        return
+    text = update.message.text.strip()
+    # убрать триггер 'Помоги' и знаки в начале
+    question = re.sub(r"^помоги[,!\s]*", "", text, flags=re.IGNORECASE).strip()
+    if not question:
+        await update.message.reply_text(
+            "Напиши вопрос после «Помоги», например:\n"
+            "«Помоги, какие у нас есть материалы по KYC?»"
+        )
+        return
+
+    await update.message.reply_text("🔎 Ищу в базе знаний...")
+
+    # Шаг 1 — получить каталог
+    index_docs, error = fetch_index_list()
+    if error:
+        await update.message.reply_text(f"⚠️ Не удалось прочитать INDEX: {error}")
+        return
+    if not index_docs:
+        await update.message.reply_text("База знаний пока пуста — нечего искать.")
+        return
+
+    # Шаг 2 — выбрать релевантные
+    try:
+        pick = pick_relevant_docs(question, index_docs)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка поиска: {str(e)[:200]}")
+        return
+
+    file_ids = pick.get("file_ids", [])
+    if not file_ids:
+        await update.message.reply_text(
+            "По этому запросу в базе ничего релевантного не нашлось.\n"
+            f"_{pick.get('reason','')}_",
+            parse_mode="Markdown"
+        )
+        return
+
+    await update.message.reply_text(f"📖 Читаю {len(file_ids)} документ(ов)...")
+
+    # Шаг 3 — прочитать полный текст
+    docs_content, error = fetch_docs_content(file_ids)
+    if error:
+        await update.message.reply_text(f"⚠️ Не удалось прочитать документы: {error}")
+        return
+
+    # Шаг 4 — ответить
+    try:
+        answer = answer_from_docs(question, docs_content)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Ошибка генерации ответа: {str(e)[:200]}")
+        return
+
+    # ссылки на источники
+    sources = "\n".join([
+        f"• {d.get('title','')}" for d in docs_content if d.get("content")
+    ])
+    full = answer
+    if len(full) > 3500:
+        full = full[:3500] + "..."
+    await update.message.reply_text(full, disable_web_page_preview=True)
+
+
 def esc(text):
     """Escape Telegram Markdown (legacy) special chars in dynamic text."""
     if text is None:
@@ -241,6 +387,8 @@ async def start(update, context):
         "🗂 Обновить индексы и журнал изменений\n"
         "↩️ Откатить ошибочное сохранение\n\n"
         "*Как начать:* просто пришли мне ссылку, файл или текст.\n\n"
+        "💡 Чтобы спросить базу знаний — начни сообщение со слова «Помоги»:\n"
+        "_«Помоги, какие у нас материалы по KYC?»_\n\n"
         "Полная инструкция — /help\n"
         "Список команд — кнопка «☰» или «/» слева от поля ввода.",
         parse_mode="Markdown"
@@ -271,7 +419,11 @@ async def help_cmd(update, context):
         "/undo — откатить последнее сохранение\n"
         "/rollback <ID> — откатить документ по ID (из ссылки или /list)\n"
         "Откатанные документы уходят в _Archive — не удаляются, их можно вернуть.\n\n"
-        "*5. Команды*\n"
+        "*5. Вопросы к базе знаний*\n"
+        "Начни сообщение со слова «Помоги» — бот найдёт нужные документы и ответит по их содержимому:\n"
+        "_«Помоги, какие потенциальные партнёры по KYC у нас есть?»_\n"
+        "_«Помоги, найди материалы по MoonPay»_\n\n"
+        "*6. Команды*\n"
         "/start — приветствие\n"
         "/help — эта инструкция\n"
         "/status — статистика базы\n"
@@ -708,14 +860,18 @@ async def setup_commands(app):
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(setup_commands).build()
+
+    # «Помоги ...» — вопрос к базе знаний (не материал для сохранения)
+    pomogi_filter = filters.TEXT & filters.Regex(r"(?i)^\s*помоги")
+
     conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND, receive_message),
+            MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter, receive_message),
             MessageHandler(filters.Document.ALL,             receive_message),
             MessageHandler(filters.VOICE,                    receive_message),
             MessageHandler(filters.AUDIO,                    receive_message),
         ],
-        states={WAITING_FOCUS: [MessageHandler(filters.TEXT, receive_focus)]},
+        states={WAITING_FOCUS: [MessageHandler(filters.TEXT & ~pomogi_filter, receive_focus)]},
         fallbacks=[CommandHandler("skip", receive_focus)],
     )
     app.add_handler(CommandHandler("start",  start))
@@ -724,9 +880,11 @@ def main():
     app.add_handler(CommandHandler("list",   list_docs))
     app.add_handler(CommandHandler("undo",     undo))
     app.add_handler(CommandHandler("rollback", rollback))
+    # вопрос к базе — до conv, чтобы перехватить раньше
+    app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_score_edit))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter, handle_score_edit))
     logger.info("NeoBank Knowledge Bot (Phase 2 — Groq + Drive) starting...")
     app.run_polling(drop_pending_updates=True)
 
