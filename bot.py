@@ -686,26 +686,42 @@ async def help_cmd(update, context):
 async def status(update, context):
     if not is_allowed(update.effective_user.id):
         return
-    docs  = context.bot_data.get("docs", [])
+    await update.message.reply_text("📊 Reading the knowledge base...")
+
+    index_docs, error = fetch_index_list()
+    if error:
+        await update.message.reply_text(f"⚠️ Could not read INDEX: {error}")
+        return
+    # only count real registry rows (those carrying a folder)
+    docs = [d for d in (index_docs or []) if d.get("folder")]
     total = len(docs)
     if not total:
-        await update.message.reply_text("📊 No documents yet. Send your first link!", parse_mode="Markdown")
+        await update.message.reply_text("📊 No documents in the knowledge base yet. Send your first link!")
         return
-    avg_imp  = round(sum(d.get("importance",  0) for d in docs) / total, 1)
-    avg_cred = round(sum(d.get("credibility", 0) for d in docs) / total, 1)
-    folders  = {}
+
+    # parse Imp/Cred from the 'scores' field (e.g. "Imp: 6  Cred: 8")
+    imp_vals, cred_vals = [], []
+    folders = {}
     for d in docs:
-        folders[d.get("folder","Unknown")] = folders.get(d.get("folder","Unknown"), 0) + 1
-    fl = "\n".join([f"  • `{f}` — {c}" for f, c in sorted(folders.items())])
-    drive_status = "✅ Connected" if APPS_SCRIPT_URL else "⚠️ Not configured"
+        folders[d.get("folder", "Unknown")] = folders.get(d.get("folder", "Unknown"), 0) + 1
+        s = d.get("scores", "")
+        mi = re.search(r"Imp:\s*(\d+)", s)
+        mc = re.search(r"Cred:\s*(\d+)", s)
+        if mi: imp_vals.append(int(mi.group(1)))
+        if mc: cred_vals.append(int(mc.group(1)))
+
+    avg_imp  = round(sum(imp_vals) / len(imp_vals), 1) if imp_vals else "—"
+    avg_cred = round(sum(cred_vals) / len(cred_vals), 1) if cred_vals else "—"
+    fl = "\n".join([f"  • {f} — {c}" for f, c in sorted(folders.items())])
+
     await update.message.reply_text(
-        f"📊 *Knowledge Base*\n\n"
-        f"📄 *{total}* documents\n"
-        f"⭐️ Avg importance: *{avg_imp}/10*\n"
-        f"✅ Avg credibility: *{avg_cred}/10*\n"
-        f"🗂 Google Drive: {drive_status}\n\n"
-        f"📁 *Folders:*\n{fl}",
-        parse_mode="Markdown"
+        f"📊 Knowledge Base\n\n"
+        f"📄 {total} documents\n"
+        f"🗂 {len(folders)} folders\n"
+        f"⭐️ Avg importance: {avg_imp}/10\n"
+        f"✅ Avg credibility: {avg_cred}/10\n\n"
+        f"📁 By folder:\n{fl}",
+        disable_web_page_preview=True
     )
 
 async def list_docs(update, context):
