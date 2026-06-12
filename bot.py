@@ -20,6 +20,7 @@ TELEGRAM_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
 GROQ_KEY        = os.environ["GROQ_API_KEY"]
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 SCRIPT_TOKEN    = os.environ.get("SCRIPT_TOKEN", "TRUSTME_SECRET_2025")
+TAVILY_KEY      = os.environ.get("TAVILY_API_KEY", "")
 ALLOWED_USERS   = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
 
 groq_client = Groq(api_key=GROQ_KEY)
@@ -118,6 +119,8 @@ def process_with_ai(content, source, focus):
     today  = datetime.now().strftime("%Y-%m-%d")
 
     prompt = f"""You are the NeoBank Knowledge Agent. Process this material and return ONLY valid JSON — no markdown, no explanation.
+
+LANGUAGE RULE: The input material may be in ANY language (Russian, English, Arabic, etc.). You must UNDERSTAND it in its original language, but ALWAYS write every output field (title, summary, key_insights, hashtags) in ENGLISH. Never output non-English text.
 
 SOURCE: {source}
 USER FOCUS: {focus if focus else "General — extract what is most relevant for TrustMe Islamic Digital Bank"}
@@ -228,7 +231,7 @@ def pick_relevant_docs(question, index_docs):
         f"{i+1}. [{d.get('folder','')}] {d.get('title','')} (id: {d.get('file_id','')}) {d.get('scores','')}"
         for i, d in enumerate(index_docs) if d.get('file_id')
     ])
-    prompt = f"""You are a search assistant for the TrustMe knowledge base. User question:
+    prompt = f"""You are a search assistant for the TrustMe knowledge base. The user question may be in any language — understand it regardless. User question:
 "{question}"
 
 Here is the document catalog (number, folder, title, id):
@@ -264,7 +267,7 @@ QUESTION: {question}
 
 DOCUMENTS:{context_text}
 
-Answer in English, to the point. At the end, note which documents you relied on."""
+Answer in English (even if the documents or question are in another language), to the point. At the end, note which documents you relied on."""
 
     response = groq_client.chat.completions.create(
         model=MODEL,
@@ -340,6 +343,242 @@ async def ask_knowledge_base(update, context):
     await update.message.reply_text(full, disable_web_page_preview=True)
 
 
+# ── Research feature ───────────────────────────────────────
+
+def tavily_search(query, max_results=4):
+    """Search the web via Tavily — returns list of {title, url, content}."""
+    if not TAVILY_KEY:
+        return None, "Tavily API key not configured"
+    try:
+        resp = requests.post("https://api.tavily.com/search", json={
+            "api_key": TAVILY_KEY,
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": max_results,
+            "include_answer": False,
+        }, timeout=40)
+        resp.raise_for_status()
+        data = resp.json()
+        results = [{
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "content": r.get("content", "")
+        } for r in data.get("results", [])]
+        return results, None
+    except Exception as e:
+        return None, str(e)
+
+
+def plan_research_queries(topic, user_material):
+    """Groq turns the topic into 2-3 focused web search queries."""
+    prompt = f"""You are a research assistant for TrustMe (Islamic digital bank).
+The user wants to research this topic: "{topic}"
+{f'They also provided this material as context: {user_material[:2000]}' if user_material else ''}
+
+Generate 2-3 focused web search queries (in English) that will find the most useful, factual information.
+Return ONLY JSON: {{"queries": ["query 1", "query 2", "query 3"]}}"""
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+        response_format={"type": "json_object"},
+    )
+    raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", response.choices[0].message.content.strip())
+    return json.loads(raw).get("queries", [topic])
+
+
+def synthesize_research(topic, user_material, web_results):
+    """Groq writes the FOUND ONLINE section from web results, with inline source refs."""
+    sources_block = ""
+    for i, r in enumerate(web_results, 1):
+        sources_block += f"\n[Source {i}] {r['title']} ({r['url']})\n{r['content'][:2000]}\n"
+
+    prompt = f"""You are a research analyst for TrustMe (Islamic digital bank).
+Topic: "{topic}"
+
+You have these web sources:
+{sources_block}
+
+Write a clear, factual research summary in ENGLISH based ONLY on these sources.
+- Organize by sub-topic with short headings
+- After each claim, cite the source number like [Source 1]
+- Be concise and factual, no fluff
+- If sources conflict, note it
+Do NOT invent facts not in the sources."""
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.4,
+    )
+    return response.choices[0].message.content.strip()
+
+
+def pick_research_folder(topic):
+    """Groq picks the best folder for the research document."""
+    prompt = f"""Topic of a research document: "{topic}"
+Available folders:
+{FOLDERS_TEXT}
+
+Pick the single best-fit folder. Return ONLY JSON: {{"folder": "Knowledge/Market"}}"""
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", response.choices[0].message.content.strip())
+        folder = json.loads(raw).get("folder", "Knowledge/Market")
+        return folder if folder in FOLDERS else "Knowledge/Market"
+    except Exception:
+        return "Knowledge/Market"
+
+
+def build_research_document(topic, user_material, web_results, synthesis):
+    """Assemble the final research document body with clear sections."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    parts = []
+    parts.append("RESEARCH DOCUMENT")
+    parts.append(f"Topic: {topic}")
+    parts.append(f"Date: {today}")
+    parts.append("Generated by: TrustMe Knowledge Agent (web research)")
+    parts.append("=" * 50)
+    parts.append("")
+    parts.append("SECTION 1 — FROM USER")
+    parts.append("(Material and request provided by the team member)")
+    parts.append("")
+    parts.append(f"Request: {topic}")
+    if user_material:
+        parts.append("")
+        parts.append("Provided material:")
+        parts.append(user_material[:5000])
+    else:
+        parts.append("(No material attached — topic-only research request)")
+    parts.append("")
+    parts.append("=" * 50)
+    parts.append("")
+    parts.append("SECTION 2 — FOUND ONLINE")
+    parts.append("(Researched by the agent from open web sources)")
+    parts.append("")
+    parts.append(synthesis)
+    parts.append("")
+    parts.append("=" * 50)
+    parts.append("")
+    parts.append("SECTION 3 — SOURCES")
+    parts.append("")
+    for i, r in enumerate(web_results, 1):
+        parts.append(f"[Source {i}] {r['title']}")
+        parts.append(f"    {r['url']}")
+    return "\n".join(parts)
+
+
+def save_research_to_drive(data, source, content):
+    """Save a research document via Apps Script create_doc."""
+    if not APPS_SCRIPT_URL:
+        return None, None, "Apps Script URL not configured"
+    payload = {
+        "token": SCRIPT_TOKEN, "action": "create_doc",
+        "title": data["title"], "folder": data["folder"], "content": content,
+        "source": source, "importance": data["importance"], "credibility": data["credibility"],
+        "date": data["date"], "version": data["version"], "hashtags": data["hashtags"],
+        "summary": data["summary"], "key_insights": data["key_insights"],
+    }
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=40)
+        logger.info(f"Research save response [{resp.status_code}]: {resp.text[:300]}")
+        result = resp.json()
+        if result.get("ok"):
+            return result.get("file_url"), result.get("file_id"), None
+        return None, None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, None, str(e)
+
+
+async def research(update, context):
+    """Handle 'Research: <topic>' — web research compiled into a Drive document."""
+    if not is_allowed(update.effective_user.id):
+        return
+    text = update.message.text.strip()
+    topic = re.sub(r"^research[:,!\s]*", "", text, flags=re.IGNORECASE).strip()
+    user_material = context.user_data.get("pending_text", "") or ""
+
+    if not topic:
+        await update.message.reply_text(
+            "Type a topic after «Research:», for example:\n"
+            "«Research: halal ETF competitors and their fee structures»"
+        )
+        return
+
+    if not TAVILY_KEY:
+        await update.message.reply_text(
+            "⚠️ Web research is not configured yet (missing Tavily key). "
+            "Add TAVILY_API_KEY in Railway and redeploy."
+        )
+        return
+
+    await update.message.reply_text(f"🔬 Researching: {topic}\nPlanning search queries...")
+
+    try:
+        queries = plan_research_queries(topic, user_material)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not plan research: {str(e)[:200]}")
+        return
+
+    all_results = []
+    seen_urls = set()
+    for q in queries[:3]:
+        await update.message.reply_text(f"🌐 Searching: {q}")
+        results, err = tavily_search(q, max_results=4)
+        if results:
+            for r in results:
+                if r["url"] not in seen_urls and r.get("content"):
+                    seen_urls.add(r["url"])
+                    all_results.append(r)
+
+    if not all_results:
+        await update.message.reply_text("No web results found for this topic. Try rephrasing.")
+        return
+
+    all_results = all_results[:8]
+    await update.message.reply_text(f"📚 Found {len(all_results)} sources. Synthesizing...")
+
+    try:
+        synthesis = synthesize_research(topic, user_material, all_results)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Synthesis error: {str(e)[:200]}")
+        return
+
+    folder = pick_research_folder(topic)
+    body = build_research_document(topic, user_material, all_results, synthesis)
+    title = f"Research — {topic[:60]}"
+
+    await update.message.reply_text(f"💾 Saving research to {folder}...")
+    payload_data = {
+        "title": title, "folder": folder,
+        "summary": f"Web research on: {topic}", "key_insights": [],
+        "importance": 6, "credibility": 6,
+        "date": datetime.now().strftime("%Y-%m-%d"), "version": "V1.0",
+        "hashtags": ["#research", "#type_research", "#lang_en"],
+    }
+    drive_url, file_id, error = save_research_to_drive(payload_data, "Web research", body)
+
+    if drive_url:
+        context.bot_data.setdefault("docs", []).append({
+            "title": title, "folder": folder, "importance": 6, "credibility": 6,
+            "date": datetime.now().strftime("%Y-%m-%d"), "source": "Web research",
+            "drive_url": drive_url, "file_id": file_id or "",
+        })
+        chat_preview = synthesis if len(synthesis) <= 3000 else synthesis[:3000] + "..."
+        await update.message.reply_text(
+            f"✅ Research saved\n📁 {folder}\n📄 {title}\n🔗 {drive_url}",
+            disable_web_page_preview=True
+        )
+        await update.message.reply_text(chat_preview, disable_web_page_preview=True)
+        context.user_data.clear()
+    else:
+        await update.message.reply_text(f"⚠️ Could not save research: {error}")
+
+
 def esc(text):
     """Escape Telegram Markdown (legacy) special chars in dynamic text."""
     if text is None:
@@ -389,6 +628,8 @@ async def start(update, context):
         "*How to start:* just send me a link, file, or text.\n\n"
         "💡 To ask the knowledge base — start your message with the word «Help»:\n"
         "_«Help, what materials do we have on KYC?»_\n\n"
+        "🔬 To run web research — start with «Research:»:\n"
+        "_«Research: halal ETF competitors and fees»_\n\n"
         "Full guide — /help\n"
         "Command list — the «☰» or «/» button next to the input field.",
         parse_mode="Markdown"
@@ -423,7 +664,12 @@ async def help_cmd(update, context):
         "Start your message with the word «Help» — the bot finds the relevant documents and answers from their content:\n"
         "_«Help, what potential KYC partners do we have?»_\n"
         "_«Help, find materials on MoonPay»_\n\n"
-        "*6. Commands*\n"
+        "*6. Web research*\n"
+        "Start your message with «Research:» — the bot searches the open web, "
+        "compiles findings with source links, and saves a document split into "
+        "FROM USER / FOUND ONLINE / SOURCES:\n"
+        "_«Research: Sharia-compliant stablecoin regulation in UAE»_\n\n"
+        "*7. Commands*\n"
         "/start — welcome\n"
         "/help — this guide\n"
         "/status — knowledge base stats\n"
@@ -863,15 +1109,17 @@ def main():
 
     # «Help ...» — a question to the knowledge base (not material to save)
     pomogi_filter = filters.TEXT & filters.Regex(r"(?i)^\s*help")
+    # «Research: ...» — web research compiled into a document
+    research_filter = filters.TEXT & filters.Regex(r"(?i)^\s*research[:\s]")
 
     conv = ConversationHandler(
         entry_points=[
-            MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter, receive_message),
+            MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter & ~research_filter, receive_message),
             MessageHandler(filters.Document.ALL,             receive_message),
             MessageHandler(filters.VOICE,                    receive_message),
             MessageHandler(filters.AUDIO,                    receive_message),
         ],
-        states={WAITING_FOCUS: [MessageHandler(filters.TEXT & ~pomogi_filter, receive_focus)]},
+        states={WAITING_FOCUS: [MessageHandler(filters.TEXT & ~pomogi_filter & ~research_filter, receive_focus)]},
         fallbacks=[CommandHandler("skip", receive_focus)],
     )
     app.add_handler(CommandHandler("start",  start))
@@ -882,9 +1130,11 @@ def main():
     app.add_handler(CommandHandler("rollback", rollback))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
+    # web research — before conv
+    app.add_handler(MessageHandler(research_filter, research))
     app.add_handler(conv)
     app.add_handler(CallbackQueryHandler(button_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter, handle_score_edit))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter & ~research_filter, handle_score_edit))
     logger.info("NeoBank Knowledge Bot (Phase 2 — Groq + Drive) starting...")
     app.run_polling(drop_pending_updates=True)
 
