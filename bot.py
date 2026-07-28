@@ -56,7 +56,17 @@ def is_allowed(user_id):
     return str(user_id) in ALLOWED_USERS
 
 
+VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com",
+               "instagram.com", "facebook.com/watch", "twitch.tv")
+
+
+def is_video_url(url):
+    u = url.lower()
+    return any(h in u for h in VIDEO_HOSTS)
+
+
 def fetch_url_content(url):
+    """Return extracted text, or None if the page could not be read."""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; TrustMeBot/1.0)"}
         resp = requests.get(url, headers=headers, timeout=15)
@@ -85,9 +95,13 @@ def fetch_url_content(url):
         text = re.sub(r"<header[^>]*>.*?</header>", "", text, flags=re.DOTALL)
         text = re.sub(r"<[^>]+>", " ", text)
         text = re.sub(r"\s+",     " ", text).strip()
-        return text[:40000]
+        # only accept if we actually got meaningful text
+        if len(text) > 200:
+            return text[:40000]
+        return None
     except Exception as e:
-        return f"[Could not fetch URL: {e}]"
+        logger.info(f"fetch_url_content failed for {url}: {e}")
+        return None
 
 
 def extract_file_content(tmp_path, filename):
@@ -110,7 +124,8 @@ def extract_file_content(tmp_path, filename):
         with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read(40000)
     except Exception as e:
-        return f"[Could not extract content: {e}]"
+        logger.info(f"extract_file_content failed for {filename}: {e}")
+        return None
 
 
 def process_with_ai(content, source, focus):
@@ -902,8 +917,20 @@ async def receive_focus(update, context):
 
     try:
         if ptype == "url":
+            url = context.user_data["pending_url"]
+            # Video links can't be read — bot has no transcript access
+            if is_video_url(url):
+                await update.message.reply_text(
+                    "🎬 This looks like a video link. I can't read video or audio content — "
+                    "I only process web articles, PDFs, DOCX and text.\n\n"
+                    "What you can do:\n"
+                    "• Paste the video's transcript or description as text\n"
+                    "• Send an article about the same topic\n"
+                    "• Use «Research: <topic>» to gather written sources on it"
+                )
+                return ConversationHandler.END
             await update.message.reply_text("🌐 Fetching URL...")
-            content = fetch_url_content(context.user_data["pending_url"])
+            content = fetch_url_content(url)
         elif ptype == "text":
             content = context.user_data["pending_text"]
         elif ptype in ("file", "voice"):
@@ -912,13 +939,28 @@ async def receive_focus(update, context):
                 await tg_file.download_to_drive(tmp.name)
                 tmp_path = tmp.name
             if ptype == "voice":
-                content = f"[Voice message — transcription coming in future update. File ID: {context.user_data['pending_file_id']}]"
+                await update.message.reply_text(
+                    "🎙 I can't transcribe voice messages yet. Please send text, a link, or a file."
+                )
+                os.unlink(tmp_path)
+                return ConversationHandler.END
             else:
                 content = extract_file_content(tmp_path, context.user_data.get("pending_file_name", "file.txt"))
             os.unlink(tmp_path)
 
-        if len(content) < 50:
-            await update.message.reply_text("⚠️ Could not extract content. Try pasting text directly.")
+        # fetch/extract failed or returned nothing usable — stop, don't save junk
+        if not content or len(content.strip()) < 50:
+            if ptype == "url":
+                await update.message.reply_text(
+                    "⚠️ I couldn't read that page. It may block automated access, require login, "
+                    "or be a video/app page with no article text.\n\n"
+                    "Try pasting the text directly, or send a different link."
+                )
+            else:
+                await update.message.reply_text(
+                    "⚠️ Couldn't extract readable content from that file. "
+                    "Try a different format (PDF, DOCX, TXT) or paste the text."
+                )
             return ConversationHandler.END
 
         data = process_with_ai(content, source, focus)
