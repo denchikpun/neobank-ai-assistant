@@ -145,6 +145,11 @@ def extract_file_content(tmp_path, filename):
         if fname.endswith((".xlsx", ".xlsm", ".xls")):
             try:
                 import openpyxl
+            except ImportError as e:
+                extract_file_content.last_error = f"openpyxl not installed: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+            try:
                 wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
                 out = []
                 for ws in wb.worksheets:
@@ -157,9 +162,14 @@ def extract_file_content(tmp_path, filename):
                         break
                 wb.close()
                 text = "\n".join(out).strip()
-                return text[:40000] if text else None
+                if text:
+                    return text[:40000]
+                extract_file_content.last_error = "workbook opened but no readable cells found"
+                logger.info(extract_file_content.last_error)
+                return None
             except Exception as e:
-                logger.info(f"xlsx extract failed: {e}")
+                extract_file_content.last_error = f"openpyxl read error: {type(e).__name__}: {e}"
+                logger.info(extract_file_content.last_error)
                 return None
         if fname.endswith(".csv"):
             with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -167,8 +177,11 @@ def extract_file_content(tmp_path, filename):
         with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read(40000)
     except Exception as e:
+        extract_file_content.last_error = f"{type(e).__name__}: {e}"
         logger.info(f"extract_file_content failed for {filename}: {e}")
         return None
+
+extract_file_content.last_error = ""
 
 
 def process_with_ai(content, source, focus):
@@ -1002,9 +1015,11 @@ async def receive_focus(update, context):
                     "Try pasting the text directly, or send a different link."
                 )
             else:
+                detail = getattr(extract_file_content, "last_error", "") or "unknown"
                 await update.message.reply_text(
-                    "⚠️ Couldn't extract readable content from that file. "
-                    "Try a different format (PDF, DOCX, TXT) or paste the text."
+                    "⚠️ Couldn't extract readable content from that file.\n"
+                    f"Reason: {detail}\n\n"
+                    "Try a different format (PDF, DOCX, XLSX, TXT) or paste the text."
                 )
             return ConversationHandler.END
 
