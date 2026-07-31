@@ -372,6 +372,72 @@ def save_to_drive(data, source, content):
         return None, None, str(e)
 
 
+# formats where the original file must be preserved (structure matters)
+STRUCTURAL_EXTS = (".xlsx", ".xlsm", ".xls", ".xltx", ".xltm", ".ods",
+                   ".pdf", ".pptx", ".ppt", ".odp")
+
+MIME_BY_EXT = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+    ".xls":  "application/vnd.ms-excel",
+    ".ods":  "application/vnd.oasis.opendocument.spreadsheet",
+    ".pdf":  "application/pdf",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt":  "application/vnd.ms-powerpoint",
+    ".odp":  "application/vnd.oasis.opendocument.presentation",
+}
+
+# Apps Script base64 request cap — keep originals under ~7 MB raw
+MAX_ORIGINAL_BYTES = 7 * 1024 * 1024
+
+
+def is_structural_file(filename):
+    return (filename or "").lower().endswith(STRUCTURAL_EXTS)
+
+
+def save_with_original_to_drive(data, source, content, file_path, file_name):
+    """Save the original binary file to Drive plus an analysis doc alongside it."""
+    if not APPS_SCRIPT_URL:
+        return None, None, None, "Apps Script URL not configured"
+    try:
+        import base64
+        size = os.path.getsize(file_path)
+        if size > MAX_ORIGINAL_BYTES:
+            return None, None, None, f"file too large to store original ({size // (1024*1024)} MB > 7 MB)"
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        ext = os.path.splitext(file_name)[1].lower()
+        payload = {
+            "token": SCRIPT_TOKEN,
+            "action": "create_with_file",
+            "title": data.get("title", "Untitled"),
+            "folder": data.get("folder", "Knowledge/Market"),
+            "content": f"SUMMARY:\n{data.get('summary','')}\n\nKEY INSIGHTS:\n" +
+                       "\n".join([f"{i+1}. {t}" for i, t in enumerate(data.get('key_insights', []))]) +
+                       f"\n\nEXTRACTED CONTENT:\n{content[:6000]}",
+            "source": source,
+            "importance": data.get("importance", 5),
+            "credibility": data.get("credibility", 5),
+            "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
+            "version": data.get("version", "V1.0"),
+            "hashtags": data.get("hashtags", []),
+            "summary": data.get("summary", ""),
+            "key_insights": data.get("key_insights", []),
+            "file_b64": b64,
+            "file_name": file_name,
+            "mime_type": MIME_BY_EXT.get(ext, "application/octet-stream"),
+        }
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=90)
+        logger.info(f"create_with_file response [{resp.status_code}]: {resp.text[:400]}")
+        result = resp.json()
+        if result.get("ok"):
+            return (result.get("file_url"), result.get("file_id"),
+                    result.get("original_url"), None)
+        return None, None, None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, None, None, str(e)
+
+
 def fetch_index_list():
     """Fetch the list of all documents from INDEX via Apps Script."""
     try:
@@ -1112,7 +1178,12 @@ async def receive_focus(update, context):
                 return ConversationHandler.END
             else:
                 content = extract_file_content(tmp_path, orig_name)
-            os.unlink(tmp_path)
+            # for structural formats, keep the original file until save; else delete now
+            if ptype == "file" and is_structural_file(orig_name) and content:
+                context.user_data["pending_original_path"] = tmp_path
+                context.user_data["pending_original_name"] = orig_name
+            else:
+                os.unlink(tmp_path)
 
         # fetch/extract failed or returned nothing usable — stop, don't save junk
         if not content or len(content.strip()) < 50:
@@ -1183,12 +1254,25 @@ async def button_callback(update, context):
     src = context.user_data.get("pending_source", "Unknown")
 
     if query.data == "confirm_save":
-        await query.message.reply_text("💾 Saving to Google Drive...")
-
-        drive_url, file_id, error = save_to_drive(pd, src, pc)
-
+        orig_path = context.user_data.get("pending_original_path")
+        orig_name = context.user_data.get("pending_original_name")
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
+        original_url = ""
+
+        if orig_path and os.path.exists(orig_path):
+            # structural file — save original + analysis doc alongside
+            await query.message.reply_text("💾 Saving original file and analysis to Google Drive...")
+            drive_url, file_id, original_url, error = save_with_original_to_drive(
+                pd, src, pc, orig_path, orig_name
+            )
+            try:
+                os.unlink(orig_path)
+            except Exception:
+                pass
+        else:
+            await query.message.reply_text("💾 Saving to Google Drive...")
+            drive_url, file_id, error = save_to_drive(pd, src, pc)
 
         context.bot_data.setdefault("docs", []).append({
             "title":       title,
@@ -1202,25 +1286,31 @@ async def button_callback(update, context):
         })
 
         if drive_url:
-            await query.message.reply_text(
+            msg = (
                 f"✅ Saved to Google Drive!\n\n"
                 f"📁 {folder}\n"
                 f"📄 {title}\n"
-                f"🔗 {drive_url}\n\n"
-                f"INDEX and CHANGELOG updated.",
-                disable_web_page_preview=True
+                f"🔗 Analysis: {drive_url}\n"
             )
+            if original_url:
+                msg += f"📎 Original file: {original_url}\n"
+            msg += "\nINDEX and CHANGELOG updated."
+            await query.message.reply_text(msg, disable_web_page_preview=True)
         else:
             await query.message.reply_text(
                 f"⚠️ Drive save failed: {error}\n\n"
-                f"Document processed but not saved to Drive. Check Apps Script configuration.",
-                parse_mode="Markdown"
+                f"Document processed but not saved to Drive."
             )
 
         await query.edit_message_reply_markup(reply_markup=None)
         context.user_data.clear()
 
     elif query.data == "discard":
+        # clean up any kept original file
+        op = context.user_data.get("pending_original_path")
+        if op and os.path.exists(op):
+            try: os.unlink(op)
+            except Exception: pass
         await query.edit_message_text("❌ Discarded.")
         context.user_data.clear()
 
@@ -1307,10 +1397,21 @@ async def handle_score_edit(update, context):
     elif text == "confirm":
         src = context.user_data.get("pending_source", "Unknown")
         pc  = context.user_data.get("pending_content", "")
-        await update.message.reply_text("💾 Saving to Google Drive...")
-        drive_url, file_id, error = save_to_drive(pd, src, pc)
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
+        orig_path = context.user_data.get("pending_original_path")
+        orig_name = context.user_data.get("pending_original_name")
+        original_url = ""
+        if orig_path and os.path.exists(orig_path):
+            await update.message.reply_text("💾 Saving original file and analysis...")
+            drive_url, file_id, original_url, error = save_with_original_to_drive(
+                pd, src, pc, orig_path, orig_name
+            )
+            try: os.unlink(orig_path)
+            except Exception: pass
+        else:
+            await update.message.reply_text("💾 Saving to Google Drive...")
+            drive_url, file_id, error = save_to_drive(pd, src, pc)
         context.bot_data.setdefault("docs", []).append({
             "title": title, "folder": folder,
             "importance": pd.get("importance", 5), "credibility": pd.get("credibility", 5),
@@ -1318,10 +1419,10 @@ async def handle_score_edit(update, context):
             "source": src, "drive_url": drive_url or "", "file_id": file_id or "",
         })
         if drive_url:
-            await update.message.reply_text(
-                f"✅ Saved!\n📁 {folder}\n📄 {title}\n🔗 {drive_url}",
-                disable_web_page_preview=True
-            )
+            msg = f"✅ Saved!\n📁 {folder}\n📄 {title}\n🔗 {drive_url}"
+            if original_url:
+                msg += f"\n📎 Original: {original_url}"
+            await update.message.reply_text(msg, disable_web_page_preview=True)
         else:
             await update.message.reply_text(f"⚠️ Drive error: {error}")
         context.user_data.clear()
