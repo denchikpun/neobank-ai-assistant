@@ -26,6 +26,8 @@ ALLOWED_USERNAMES = set(
     for u in os.environ.get("ALLOWED_USERNAMES", "denya951,daukaz,kompassito").split(",")
     if u.strip()
 )
+# superadmin can delete any folder; admins can delete only folders they created
+SUPERADMIN = os.environ.get("SUPERADMIN_USERNAME", "denya951").strip().lstrip("@").lower()
 
 groq_client = Groq(api_key=GROQ_KEY)
 MODEL = "llama-3.3-70b-versatile"
@@ -52,6 +54,95 @@ FOLDERS = {
     "Company/HR":              "HR and org structure docs",
 }
 FOLDERS_TEXT = "\n".join([f"- {k}: {v}" for k, v in FOLDERS.items()])
+
+
+def get_live_folders():
+    """Return the current folder list: hardcoded seed + any created in Drive.
+    Falls back to the hardcoded list if the scan fails."""
+    base = list(FOLDERS.keys())
+    if not APPS_SCRIPT_URL:
+        return base
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "list_folders"
+        }, timeout=20)
+        result = resp.json()
+        if result.get("ok"):
+            scanned = list(result.get("folders", {}).keys())
+            # union, keep order: seed first, then any new ones
+            merged = base + [f for f in scanned if f not in base]
+            return merged or base
+    except Exception as e:
+        logger.info(f"list_folders failed, using hardcoded: {e}")
+    return base
+
+
+def is_superadmin(update):
+    u = getattr(update, "effective_user", None)
+    return bool(u) and (u.username or "").lower() == SUPERADMIN
+
+
+def folders_for_prompt():
+    """Folder list text for AI classification — includes live sub-folders.
+    Falls back to the hardcoded descriptions when scan is unavailable."""
+    live = get_live_folders()
+    lines = []
+    for path in live:
+        desc = FOLDERS.get(path, "")
+        lines.append(f"- {path}: {desc}" if desc else f"- {path}")
+    return "\n".join(lines)
+
+
+def build_folder_menu(prefix, allow_new, newfolder_cb):
+    """Top-level folder menu. Folders that have sub-folders get an 'expand'
+    button (▸) leading to their sub-folders; leaf folders select directly.
+    prefix is 'folder' (analysis) or 'rawfolder' (raw save)."""
+    live = get_live_folders()
+    tops = [f for f in live if f.count("/") == 1]  # e.g. Company/Banking_Ops
+    rows = []
+    for top in tops:
+        has_subs = any(f.startswith(top + "/") for f in live)
+        if has_subs:
+            rows.append([InlineKeyboardButton(f"{top}  ▸", callback_data=f"expand_|{prefix}|{top}")])
+        else:
+            rows.append([InlineKeyboardButton(top, callback_data=f"{prefix}_{top}")])
+    if allow_new:
+        rows.append([InlineKeyboardButton("➕ New folder", callback_data=newfolder_cb)])
+    return rows
+
+
+def create_folder_in_drive(parent_path, name, created_by):
+    """Ask Apps Script to create a folder. Returns (path, error)."""
+    if not APPS_SCRIPT_URL:
+        return None, "Apps Script URL not configured"
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "create_folder",
+            "parent_path": parent_path, "name": name, "created_by": created_by,
+        }, timeout=30)
+        result = resp.json()
+        if result.get("ok"):
+            return result.get("path"), None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
+
+
+def delete_folder_in_drive(path, requested_by, superadmin):
+    """Ask Apps Script to archive a folder. Returns (result, error)."""
+    if not APPS_SCRIPT_URL:
+        return None, "Apps Script URL not configured"
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "delete_folder",
+            "path": path, "requested_by": requested_by, "is_superadmin": superadmin,
+        }, timeout=30)
+        result = resp.json()
+        if result.get("ok"):
+            return result, None
+        return None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, str(e)
 
 
 def is_allowed(update):
@@ -292,6 +383,7 @@ def process_with_ai(content, source, focus):
     pages  = max(1, len(content.split()) // 250)
     n_tags = "15-20" if pages >= 100 else "10-15" if pages >= 50 else "5-10" if pages >= 10 else "3-5"
     today  = datetime.now().strftime("%Y-%m-%d")
+    folder_list = folders_for_prompt()
 
     prompt = f"""You are the NeoBank Knowledge Agent. Process this material and return ONLY valid JSON — no markdown, no explanation.
 
@@ -707,7 +799,7 @@ def pick_research_folder(topic):
     """Groq picks the best folder for the research document."""
     prompt = f"""Topic of a research document: "{topic}"
 Available folders:
-{FOLDERS_TEXT}
+{folders_for_prompt()}
 
 Pick the single best-fit folder. Return ONLY JSON: {{"folder": "Knowledge/Market"}}"""
     try:
@@ -719,7 +811,7 @@ Pick the single best-fit folder. Return ONLY JSON: {{"folder": "Knowledge/Market
         )
         raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", response.choices[0].message.content.strip())
         folder = json.loads(raw).get("folder", "Knowledge/Market")
-        return folder if folder in FOLDERS else "Knowledge/Market"
+        return folder if folder in get_live_folders() else "Knowledge/Market"
     except Exception:
         return "Knowledge/Market"
 
@@ -1014,6 +1106,58 @@ async def status(update, context):
         f"📁 By folder:\n{fl}",
         disable_web_page_preview=True
     )
+
+async def newfolder_cmd(update, context):
+    """/newfolder <Parent/Path> <Name> — admins only."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /newfolder <Parent/Path> <Name>\n\n"
+            "Examples:\n"
+            "• /newfolder Company/Banking_Ops Cards\n"
+            "• /newfolder Knowledge Legal\n\n"
+            "Name must be English letters, digits or underscore (no spaces)."
+        )
+        return
+    parent_path, name = args[0], args[1]
+    created_by = (update.effective_user.username or "unknown").lower()
+    await update.message.reply_text(f"📁 Creating folder «{name}» in {parent_path}...")
+    path, error = create_folder_in_drive(parent_path, name, created_by)
+    if path:
+        await update.message.reply_text(f"✅ Folder created: {path}\nIt's now available when saving.")
+    else:
+        await update.message.reply_text(f"⚠️ Could not create folder: {error}")
+
+
+async def delfolder_cmd(update, context):
+    """/delfolder <Full/Path> — archives a folder (superadmin any, admin only own)."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Usage: /delfolder <Full/Path>\n\n"
+            "Example: /delfolder Company/Banking_Ops/Cards\n\n"
+            "The folder and its contents move to _Archive (nothing is deleted).\n"
+            "You can archive folders you created; the superadmin can archive any."
+        )
+        return
+    path = " ".join(args).strip()
+    requested_by = (update.effective_user.username or "unknown").lower()
+    await update.message.reply_text(f"🗑 Archiving folder {path}...")
+    result, error = delete_folder_in_drive(path, requested_by, is_superadmin(update))
+    if result:
+        await update.message.reply_text(
+            f"✅ Folder moved to _Archive: {path}\n"
+            f"Nothing is deleted — it can be restored from _Archive."
+        )
+    else:
+        await update.message.reply_text(f"⚠️ Could not archive folder: {error}")
+
 
 async def list_docs(update, context):
     if not is_allowed(update):
@@ -1405,16 +1549,37 @@ async def button_callback(update, context):
         )
 
     elif query.data == "change_folder":
-        kb = [[InlineKeyboardButton(f, callback_data=f"folder_{f}")] for f in FOLDERS]
-        await query.message.reply_text("📁 *Choose folder:*", parse_mode="Markdown",
-                                        reply_markup=InlineKeyboardMarkup(kb))
+        kb = build_folder_menu("folder", is_allowed(update), "newfolder_analysis")
+        await query.message.reply_text("📁 *Choose a folder* (tap a department to see its sub-folders):",
+                                        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
     elif query.data == "raw_save":
-        # save without analysis — folder picker first
-        kb = [[InlineKeyboardButton(f, callback_data=f"rawfolder_{f}")] for f in FOLDERS]
+        kb = build_folder_menu("rawfolder", is_allowed(update), "newfolder_raw")
         await query.message.reply_text(
-            "📁 Choose a folder to save the file without processing:",
-            reply_markup=InlineKeyboardMarkup(kb)
+            "📁 *Choose a folder to save the file* (tap a department for sub-folders):",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb)
+        )
+
+    elif query.data.startswith("expand_"):
+        # user tapped a top-level folder — show its sub-folders (or pick it directly)
+        _, prefix, top = query.data.split("|", 2)  # expand_|folder|Company/Banking_Ops
+        subs = [f for f in get_live_folders() if f.startswith(top + "/")]
+        rows = [[InlineKeyboardButton(f"📂 {top}  (save here)", callback_data=f"{prefix}_{top}")]]
+        for s in subs:
+            leaf = s[len(top) + 1:]
+            rows.append([InlineKeyboardButton(f"   └ {leaf}", callback_data=f"{prefix}_{s}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=("change_folder" if prefix == "folder" else "raw_save"))])
+        await query.edit_message_text(f"📁 *{top}* — choose sub-folder or save at department level:",
+                                       parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+
+    elif query.data in ("newfolder_analysis", "newfolder_raw"):
+        await query.message.reply_text(
+            "➕ To create a folder, use the command:\n"
+            "/newfolder <Parent/Path> <Name>\n\n"
+            "Examples:\n"
+            "• /newfolder Company/Banking_Ops Cards\n"
+            "• /newfolder Knowledge Legal\n\n"
+            "Then send the file again and pick the new folder."
         )
 
     elif query.data.startswith("rawfolder_"):
@@ -1543,6 +1708,8 @@ async def setup_commands(app):
         BotCommand("list",     "Recent documents"),
         BotCommand("undo",     "Roll back the last save"),
         BotCommand("rollback", "Roll back a document by ID"),
+        BotCommand("newfolder", "Create a folder (admins)"),
+        BotCommand("delfolder", "Archive a folder (admins)"),
     ])
     logger.info("Bot command menu registered")
 
@@ -1571,6 +1738,8 @@ def main():
     app.add_handler(CommandHandler("list",   list_docs))
     app.add_handler(CommandHandler("undo",     undo))
     app.add_handler(CommandHandler("rollback", rollback))
+    app.add_handler(CommandHandler("newfolder", newfolder_cmd))
+    app.add_handler(CommandHandler("delfolder", delfolder_cmd))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     # web research — before conv
