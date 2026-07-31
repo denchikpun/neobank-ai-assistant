@@ -432,10 +432,10 @@ def save_with_original_to_drive(data, source, content, file_path, file_name):
         result = resp.json()
         if result.get("ok"):
             return (result.get("file_url"), result.get("file_id"),
-                    result.get("original_url"), None)
-        return None, None, None, result.get("error", "Unknown error")
+                    result.get("original_url"), result.get("original_id"), None)
+        return None, None, None, None, result.get("error", "Unknown error")
     except Exception as e:
-        return None, None, None, str(e)
+        return None, None, None, None, str(e)
 
 
 def fetch_index_list():
@@ -1053,11 +1053,19 @@ async def undo(update, context):
     result, error = rollback_in_drive(target["file_id"])
     if result:
         target["rolled_back"] = True
+        extra = ""
+        # if this save had an original file (Excel/PDF etc.), archive it too
+        orig_id = target.get("original_id")
+        if orig_id:
+            r2, e2 = rollback_in_drive(orig_id)
+            extra = "\n📎 Original file also moved to _Archive." if r2 else \
+                    f"\n⚠️ Analysis archived, but original file failed: {e2}"
         await update.message.reply_text(
             f"✅ Rolled back to _Archive\n"
             f"📄 {result.get('title', target.get('title'))}\n"
-            f"📁 {result.get('from','—')} → _Archive\n\n"
-            f"The document is not deleted — it can be restored from _Archive.",
+            f"📁 {result.get('from','—')} → _Archive"
+            f"{extra}\n\n"
+            f"Nothing is deleted — items can be restored from _Archive.",
             disable_web_page_preview=True
         )
     else:
@@ -1084,15 +1092,22 @@ async def rollback(update, context):
     await update.message.reply_text(f"↩️ Rolling back document {file_id}...")
     result, error = rollback_in_drive(file_id)
     if result:
-        # mark in history if present
+        extra = ""
+        # mark in history and archive the linked original file if we know it
         for d in context.bot_data.get("docs", []):
             if d.get("file_id") == file_id:
                 d["rolled_back"] = True
+                if d.get("original_id"):
+                    r2, e2 = rollback_in_drive(d["original_id"])
+                    extra = "\n📎 Original file also moved to _Archive." if r2 else \
+                            f"\n⚠️ Analysis archived, but original file failed: {e2}"
+                break
         await update.message.reply_text(
             f"✅ Rolled back to _Archive\n"
             f"📄 {result.get('title','—')}\n"
-            f"📁 {result.get('from','—')} → _Archive\n\n"
-            f"The document is not deleted — it can be restored from _Archive.",
+            f"📁 {result.get('from','—')} → _Archive"
+            f"{extra}\n\n"
+            f"Nothing is deleted — items can be restored from _Archive.",
             disable_web_page_preview=True
         )
     else:
@@ -1259,11 +1274,12 @@ async def button_callback(update, context):
         title  = pd.get("title", "Untitled")
         folder = pd.get("folder", "Knowledge/Market")
         original_url = ""
+        original_id = ""
 
         if orig_path and os.path.exists(orig_path):
             # structural file — save original + analysis doc alongside
             await query.message.reply_text("💾 Saving original file and analysis to Google Drive...")
-            drive_url, file_id, original_url, error = save_with_original_to_drive(
+            drive_url, file_id, original_url, original_id, error = save_with_original_to_drive(
                 pd, src, pc, orig_path, orig_name
             )
             try:
@@ -1283,6 +1299,7 @@ async def button_callback(update, context):
             "source":      src,
             "drive_url":   drive_url or "",
             "file_id":     file_id or "",
+            "original_id": original_id or "",
         })
 
         if drive_url:
@@ -1402,9 +1419,10 @@ async def handle_score_edit(update, context):
         orig_path = context.user_data.get("pending_original_path")
         orig_name = context.user_data.get("pending_original_name")
         original_url = ""
+        original_id = ""
         if orig_path and os.path.exists(orig_path):
             await update.message.reply_text("💾 Saving original file and analysis...")
-            drive_url, file_id, original_url, error = save_with_original_to_drive(
+            drive_url, file_id, original_url, original_id, error = save_with_original_to_drive(
                 pd, src, pc, orig_path, orig_name
             )
             try: os.unlink(orig_path)
@@ -1417,6 +1435,7 @@ async def handle_score_edit(update, context):
             "importance": pd.get("importance", 5), "credibility": pd.get("credibility", 5),
             "date": pd.get("date", datetime.now().strftime("%Y-%m-%d")),
             "source": src, "drive_url": drive_url or "", "file_id": file_id or "",
+            "original_id": original_id or "",
         })
         if drive_url:
             msg = f"✅ Saved!\n📁 {folder}\n📄 {title}\n🔗 {drive_url}"
