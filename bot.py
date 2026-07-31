@@ -21,7 +21,11 @@ GROQ_KEY        = os.environ["GROQ_API_KEY"]
 APPS_SCRIPT_URL = os.environ.get("APPS_SCRIPT_URL", "")
 SCRIPT_TOKEN    = os.environ.get("SCRIPT_TOKEN", "TRUSTME_SECRET_2025")
 TAVILY_KEY      = os.environ.get("TAVILY_API_KEY", "")
-ALLOWED_USERS   = set(os.environ.get("ALLOWED_USER_IDS", "").split(","))
+ALLOWED_USERNAMES = set(
+    u.strip().lstrip("@").lower()
+    for u in os.environ.get("ALLOWED_USERNAMES", "denya951,daukaz,kompassito").split(",")
+    if u.strip()
+)
 
 groq_client = Groq(api_key=GROQ_KEY)
 MODEL = "llama-3.3-70b-versatile"
@@ -50,10 +54,27 @@ FOLDERS = {
 FOLDERS_TEXT = "\n".join([f"- {k}: {v}" for k, v in FOLDERS.items()])
 
 
-def is_allowed(user_id):
-    if not ALLOWED_USERS or ALLOWED_USERS == {""}:
+def is_allowed(update):
+    """Access is granted only to Telegram usernames in the allowlist."""
+    user = getattr(update, "effective_user", None)
+    if user is None:
+        return False
+    uname = (user.username or "").lower()
+    # empty allowlist = open (safety fallback); normally it's populated
+    if not ALLOWED_USERNAMES:
         return True
-    return str(user_id) in ALLOWED_USERS
+    return uname in ALLOWED_USERNAMES
+
+
+async def deny(update):
+    """Tell an unauthorized user they don't have access."""
+    try:
+        await update.message.reply_text(
+            "⛔️ Access denied. You are not authorized to use this bot.\n"
+            "Contact an administrator to request access."
+        )
+    except Exception:
+        pass
 
 
 VIDEO_HOSTS = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com",
@@ -121,6 +142,28 @@ def extract_file_content(tmp_path, filename):
                 return "\n".join([p.text for p in doc.paragraphs])[:40000]
             except ImportError:
                 pass
+        if fname.endswith((".xlsx", ".xlsm", ".xls")):
+            try:
+                import openpyxl
+                wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+                out = []
+                for ws in wb.worksheets:
+                    out.append(f"=== Sheet: {ws.title} ===")
+                    for row in ws.iter_rows(values_only=True):
+                        cells = [str(c) for c in row if c is not None]
+                        if cells:
+                            out.append(" | ".join(cells))
+                    if sum(len(x) for x in out) > 40000:
+                        break
+                wb.close()
+                text = "\n".join(out).strip()
+                return text[:40000] if text else None
+            except Exception as e:
+                logger.info(f"xlsx extract failed: {e}")
+                return None
+        if fname.endswith(".csv"):
+            with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read(40000)
         with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read(40000)
     except Exception as e:
@@ -294,7 +337,8 @@ Answer in English (even if the documents or question are in another language), t
 
 async def ask_knowledge_base(update, context):
     """Handle a 'Help, ...' question — search and answer from the knowledge base."""
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
+        await deny(update)
         return
     text = update.message.text.strip()
     # remove the 'Help' trigger and leading punctuation
@@ -511,7 +555,8 @@ def save_research_to_drive(data, source, content):
 
 async def research(update, context):
     """Handle 'Research: <topic>' — web research compiled into a Drive document."""
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
+        await deny(update)
         return
     text = update.message.text.strip()
     topic = re.sub(r"^research[:,!\s]*", "", text, flags=re.IGNORECASE).strip()
@@ -628,8 +673,8 @@ def format_preview(data, source):
 # ── Command handlers ──────────────────────────────────────
 
 async def start(update, context):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔️ Access restricted.")
+    if not is_allowed(update):
+        await deny(update)
         return
     await update.message.reply_text(
         "👋 *NeoBank Knowledge Agent*\n"
@@ -652,7 +697,7 @@ async def start(update, context):
 
 
 async def help_cmd(update, context):
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     await update.message.reply_text(
         "📖 *NeoBank Knowledge Agent — Guide*\n\n"
@@ -699,7 +744,7 @@ async def help_cmd(update, context):
     )
 
 async def status(update, context):
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     await update.message.reply_text("📊 Reading the knowledge base...")
 
@@ -740,7 +785,7 @@ async def status(update, context):
     )
 
 async def list_docs(update, context):
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     docs = context.bot_data.get("docs", [])
     if not docs:
@@ -808,7 +853,7 @@ def rollback_in_drive(file_id):
 
 async def undo(update, context):
     """Roll back the last created document — move it to _Archive."""
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     docs = context.bot_data.get("docs", [])
     # find the last document with a file_id that hasn't been rolled back yet
@@ -838,7 +883,7 @@ async def undo(update, context):
 
 async def rollback(update, context):
     """Roll back a document by ID: /rollback <file_id>"""
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     args = context.args
     if not args:
@@ -874,8 +919,8 @@ async def rollback(update, context):
 # ── Receive material ──────────────────────────────────────
 
 async def receive_message(update, context):
-    if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔️ Access restricted.")
+    if not is_allowed(update):
+        await deny(update)
         return
     msg = update.message
     if msg.document or msg.audio:
@@ -906,7 +951,7 @@ async def receive_message(update, context):
 
 
 async def receive_focus(update, context):
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return ConversationHandler.END
     focus = "" if update.message.text.strip().startswith("/skip") else update.message.text.strip()
     await update.message.reply_text("⏳ Analysing...")
@@ -1108,7 +1153,7 @@ async def button_callback(update, context):
 
 
 async def handle_score_edit(update, context):
-    if not is_allowed(update.effective_user.id):
+    if not is_allowed(update):
         return
     text = update.message.text.strip().lower()
     pd   = context.user_data.get("pending_data")
