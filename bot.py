@@ -395,6 +395,54 @@ def is_structural_file(filename):
     return (filename or "").lower().endswith(STRUCTURAL_EXTS)
 
 
+def make_filename(base_title, version="V1.0"):
+    """Build a stored name per our rules: Title_Version_YYYY-MM-DD (no extension —
+    Apps Script re-adds the original extension). Cleans spaces/punctuation."""
+    # strip any existing extension from the incoming name
+    base = os.path.splitext(base_title or "Untitled")[0]
+    # keep letters/numbers/underscore; turn spaces and separators into underscore
+    base = re.sub(r"[^\w\-]+", "_", base, flags=re.UNICODE).strip("_") or "Untitled"
+    date = datetime.now().strftime("%Y-%m-%d")
+    return f"{base}_{version}_{date}"
+
+
+def save_file_only_to_drive(folder, title, file_path, file_name, source):
+    """Save just the original file to Drive (no analysis doc)."""
+    if not APPS_SCRIPT_URL:
+        return None, None, "Apps Script URL not configured"
+    try:
+        import base64
+        size = os.path.getsize(file_path)
+        if size > MAX_ORIGINAL_BYTES:
+            return None, None, f"file too large ({size // (1024*1024)} MB > 7 MB)"
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        ext = os.path.splitext(file_name)[1].lower()
+        payload = {
+            "token": SCRIPT_TOKEN,
+            "action": "save_file_only",
+            "title": title,
+            "folder": folder,
+            "file_b64": b64,
+            "file_name": file_name,
+            "mime_type": MIME_BY_EXT.get(ext, "application/octet-stream"),
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "version": "V1.0",
+            "source": source,
+            "importance": 0,
+            "credibility": 0,
+            "hashtags": ["#raw_unprocessed"],
+        }
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=90)
+        logger.info(f"save_file_only response [{resp.status_code}]: {resp.text[:300]}")
+        result = resp.json()
+        if result.get("ok"):
+            return result.get("file_url"), result.get("file_id"), None
+        return None, None, result.get("error", "Unknown error")
+    except Exception as e:
+        return None, None, str(e)
+
+
 def save_with_original_to_drive(data, source, content, file_path, file_name):
     """Save the original binary file to Drive plus an analysis doc alongside it."""
     if not APPS_SCRIPT_URL:
@@ -1261,6 +1309,24 @@ async def receive_focus(update, context):
 
 # ── Callback handlers ─────────────────────────────────────
 
+async def _finish_raw(query, context, folder, title, result, error):
+    """Record and report a raw (no-analysis) save of text/url/non-structural file."""
+    if result and result.get("ok"):
+        context.bot_data.setdefault("docs", []).append({
+            "title": title, "folder": folder, "importance": "—", "credibility": "—",
+            "date": datetime.now().strftime("%Y-%m-%d"), "source": query.from_user.username or "—",
+            "drive_url": result.get("file_url", ""), "file_id": result.get("file_id", ""),
+            "original_id": "",
+        })
+        await query.message.reply_text(
+            f"✅ Saved without analysis\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
+            disable_web_page_preview=True
+        )
+    else:
+        await query.message.reply_text(f"⚠️ Could not save: {error}")
+    context.user_data.clear()
+
+
 async def button_callback(update, context):
     query = update.callback_query
     await query.answer()
@@ -1357,34 +1423,55 @@ async def button_callback(update, context):
 
         ptype = context.user_data.get("pending_type")
         fname = context.user_data.get("pending_file_name", "")
-        text_content = ""
-        tg_file_id = context.user_data.get("pending_file_id")
 
-        # for text/link — save as a text document;
-        # for a file — take the name and content as-is
+        # build the payload depending on what was sent
         if ptype == "text":
             text_content = context.user_data.get("pending_text", "")
             title = (text_content[:50] + "...") if len(text_content) > 50 else (text_content or "Note")
-        elif ptype == "url":
-            text_content = context.user_data.get("pending_url", "")
-            title = "Link: " + text_content[:60]
-        else:
-            title = fname or "Uploaded file"
+            result, error = save_raw_to_drive(folder, title, text_content, src)
+            await _finish_raw(query, context, folder, title, result, error)
+            return
 
-        result, error = save_raw_to_drive(folder, title, text_content, src)
-        if result and result.get("ok"):
-            context.bot_data.setdefault("docs", []).append({
-                "title": title, "folder": folder, "importance": "—", "credibility": "—",
-                "date": datetime.now().strftime("%Y-%m-%d"), "source": src,
-                "drive_url": result.get("file_url", ""), "file_id": result.get("file_id", ""),
-            })
-            await query.message.reply_text(
-                f"✅ Saved without analysis\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
-                disable_web_page_preview=True
+        if ptype == "url":
+            url = context.user_data.get("pending_url", "")
+            await query.message.reply_text("🌐 Fetching page...")
+            text_content = fetch_url_content(url) or ""
+            title = "Link: " + url[:60]
+            if not text_content:
+                text_content = f"(could not read page)\nURL: {url}"
+            result, error = save_raw_to_drive(folder, title, f"URL: {url}\n\n{text_content}", src)
+            await _finish_raw(query, context, folder, title, result, error)
+            return
+
+        if ptype == "file":
+            # download the file, then save the file itself (no analysis doc)
+            tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
+            ext = os.path.splitext(fname)[1] or ".bin"
+            fd, tmp_path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            await tg_file.download_to_drive(tmp_path)
+
+            stored_title = make_filename(fname or "Uploaded_file")
+            drive_url, file_id, error = save_file_only_to_drive(
+                folder, stored_title, tmp_path, fname, src
             )
-        else:
-            await query.message.reply_text(f"⚠️ Could not save: {error}")
-        context.user_data.clear()
+            try: os.unlink(tmp_path)
+            except Exception: pass
+
+            if drive_url:
+                context.bot_data.setdefault("docs", []).append({
+                    "title": stored_title, "folder": folder, "importance": "—", "credibility": "—",
+                    "date": datetime.now().strftime("%Y-%m-%d"), "source": src,
+                    "drive_url": drive_url, "file_id": file_id or "", "original_id": "",
+                })
+                await query.message.reply_text(
+                    f"✅ File saved (no analysis)\n📁 {folder}\n📄 {stored_title}\n🔗 {drive_url}",
+                    disable_web_page_preview=True
+                )
+            else:
+                await query.message.reply_text(f"⚠️ Could not save: {error}")
+            context.user_data.clear()
+            return
 
     elif query.data.startswith("folder_"):
         context.user_data["pending_data"]["folder"] = query.data[7:]
