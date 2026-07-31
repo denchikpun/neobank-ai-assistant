@@ -142,7 +142,8 @@ def extract_file_content(tmp_path, filename):
                 return "\n".join([p.text for p in doc.paragraphs])[:40000]
             except ImportError:
                 pass
-        if fname.endswith((".xlsx", ".xlsm", ".xls")):
+        # Modern Excel formats (openpyxl): .xlsx .xlsm .xltx .xltm
+        if fname.endswith((".xlsx", ".xlsm", ".xltx", ".xltm")):
             try:
                 import openpyxl
             except ImportError as e:
@@ -164,14 +165,77 @@ def extract_file_content(tmp_path, filename):
                 text = "\n".join(out).strip()
                 if text:
                     return text[:40000]
-                extract_file_content.last_error = "workbook opened but no readable cells found"
-                logger.info(extract_file_content.last_error)
+                extract_file_content.last_error = "spreadsheet opened but no readable cells found"
                 return None
             except Exception as e:
                 extract_file_content.last_error = f"openpyxl read error: {type(e).__name__}: {e}"
                 logger.info(extract_file_content.last_error)
                 return None
-        if fname.endswith(".csv"):
+        # Legacy Excel 97-2003 (.xls) via xlrd
+        if fname.endswith(".xls"):
+            try:
+                import xlrd
+            except ImportError as e:
+                extract_file_content.last_error = f"xlrd not installed: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+            try:
+                wb = xlrd.open_workbook(tmp_path)
+                out = []
+                for sh in wb.sheets():
+                    out.append(f"=== Sheet: {sh.name} ===")
+                    for r in range(sh.nrows):
+                        cells = [str(sh.cell_value(r, c)) for c in range(sh.ncols)
+                                 if sh.cell_value(r, c) != ""]
+                        if cells:
+                            out.append(" | ".join(cells))
+                    if sum(len(x) for x in out) > 40000:
+                        break
+                text = "\n".join(out).strip()
+                if text:
+                    return text[:40000]
+                extract_file_content.last_error = "xls opened but no readable cells found"
+                return None
+            except Exception as e:
+                extract_file_content.last_error = f"xlrd read error: {type(e).__name__}: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+        # OpenDocument Spreadsheet (.ods) via odfpy
+        if fname.endswith(".ods"):
+            try:
+                from odf.opendocument import load as odf_load
+                from odf.table import Table, TableRow, TableCell
+                from odf.text import P
+            except ImportError as e:
+                extract_file_content.last_error = f"odfpy not installed: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+            try:
+                doc = odf_load(tmp_path)
+                out = []
+                for table in doc.spreadsheet.getElementsByType(Table):
+                    out.append(f"=== Sheet: {table.getAttribute('name')} ===")
+                    for row in table.getElementsByType(TableRow):
+                        cells = []
+                        for cell in row.getElementsByType(TableCell):
+                            txt = "".join(str(p) for p in cell.getElementsByType(P))
+                            if txt:
+                                cells.append(txt)
+                        if cells:
+                            out.append(" | ".join(cells))
+                    if sum(len(x) for x in out) > 40000:
+                        break
+                text = "\n".join(out).strip()
+                if text:
+                    return text[:40000]
+                extract_file_content.last_error = "ods opened but no readable cells found"
+                return None
+            except Exception as e:
+                extract_file_content.last_error = f"ods read error: {type(e).__name__}: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+        # Plain delimited text
+        if fname.endswith((".csv", ".tsv", ".txt", ".md", ".json")):
             with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read(40000)
         with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -717,7 +781,7 @@ async def help_cmd(update, context):
         "*1. How to add material*\n"
         "Send the bot:\n"
         "🔗 a link — article, page, post\n"
-        "📎 a file — PDF, DOCX, TXT\n"
+        "📎 a file — PDF, DOCX, Excel (XLSX/XLS), CSV, ODS, TXT\n"
         "💬 text — just type or paste\n\n"
         "*2. What happens*\n"
         "The bot will ask what to focus on. Then two paths:\n"
@@ -1019,7 +1083,7 @@ async def receive_focus(update, context):
                 await update.message.reply_text(
                     "⚠️ Couldn't extract readable content from that file.\n"
                     f"Reason: {detail}\n\n"
-                    "Try a different format (PDF, DOCX, XLSX, TXT) or paste the text."
+                    "Supported: PDF, DOCX, XLSX, XLS, CSV, ODS, TXT. Or paste the text."
                 )
             return ConversationHandler.END
 
