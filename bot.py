@@ -1097,9 +1097,13 @@ async def receive_focus(update, context):
             content = context.user_data["pending_text"]
         elif ptype in ("file", "voice"):
             tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
-            with tempfile.NamedTemporaryFile(delete=False) as tmp:
-                await tg_file.download_to_drive(tmp.name)
-                tmp_path = tmp.name
+            orig_name = context.user_data.get("pending_file_name", "file.txt")
+            # preserve the real extension so extraction routes correctly,
+            # and use a closed path so bytes are fully flushed before reading
+            ext = os.path.splitext(orig_name)[1] or ".bin"
+            fd, tmp_path = tempfile.mkstemp(suffix=ext)
+            os.close(fd)
+            await tg_file.download_to_drive(tmp_path)
             if ptype == "voice":
                 await update.message.reply_text(
                     "🎙 I can't transcribe voice messages yet. Please send text, a link, or a file."
@@ -1107,7 +1111,7 @@ async def receive_focus(update, context):
                 os.unlink(tmp_path)
                 return ConversationHandler.END
             else:
-                content = extract_file_content(tmp_path, context.user_data.get("pending_file_name", "file.txt"))
+                content = extract_file_content(tmp_path, orig_name)
             os.unlink(tmp_path)
 
         # fetch/extract failed or returned nothing usable — stop, don't save junk
