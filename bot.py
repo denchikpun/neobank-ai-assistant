@@ -234,6 +234,26 @@ def extract_file_content(tmp_path, filename):
                 extract_file_content.last_error = f"ods read error: {type(e).__name__}: {e}"
                 logger.info(extract_file_content.last_error)
                 return None
+        # Rich Text Format (.rtf)
+        if fname.endswith(".rtf"):
+            try:
+                from striprtf.striprtf import rtf_to_text
+            except ImportError as e:
+                extract_file_content.last_error = f"striprtf not installed: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
+            try:
+                with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
+                    raw = f.read()
+                text = rtf_to_text(raw).strip()
+                if text:
+                    return text[:40000]
+                extract_file_content.last_error = "rtf parsed but empty"
+                return None
+            except Exception as e:
+                extract_file_content.last_error = f"rtf read error: {type(e).__name__}: {e}"
+                logger.info(extract_file_content.last_error)
+                return None
         # Plain delimited text
         if fname.endswith((".csv", ".tsv", ".txt", ".md", ".json")):
             with open(tmp_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -246,6 +266,26 @@ def extract_file_content(tmp_path, filename):
         return None
 
 extract_file_content.last_error = ""
+
+
+def looks_like_garbage(text):
+    """True if text looks like markup/binary junk rather than readable content.
+    Prevents the AI from hallucinating a confident summary of unreadable input."""
+    if not text:
+        return True
+    sample = text[:2000]
+    # RTF / control-word markup signatures
+    if sample.lstrip().startswith(("{\\rtf", "{\\*", "%PDF", "PK\x03\x04")):
+        return True
+    # ratio of "structural" chars typical of markup/binary (pipe excluded — tables use it)
+    junk = sum(sample.count(c) for c in "{}\\<>")
+    if junk > len(sample) * 0.08:
+        return True
+    # ratio of readable letters (any alphabet) must be reasonable
+    letters = sum(1 for c in sample if c.isalpha() or c.isspace())
+    if letters < len(sample) * 0.5:
+        return True
+    return False
 
 
 def process_with_ai(content, source, focus):
@@ -1085,6 +1125,16 @@ async def receive_focus(update, context):
                     f"Reason: {detail}\n\n"
                     "Supported: PDF, DOCX, XLSX, XLS, CSV, ODS, TXT. Or paste the text."
                 )
+            return ConversationHandler.END
+
+        # guard against unreadable markup/binary that would make the AI hallucinate
+        if looks_like_garbage(content):
+            await update.message.reply_text(
+                "⚠️ I could open the file but the content came out as formatting codes, "
+                "not readable text — so I won't guess at a summary.\n\n"
+                "This usually means the format isn't fully supported. Try exporting to "
+                "PDF, DOCX or plain TXT, or paste the text directly."
+            )
             return ConversationHandler.END
 
         data = process_with_ai(content, source, focus)
