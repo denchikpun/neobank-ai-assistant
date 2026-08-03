@@ -1700,7 +1700,9 @@ async def handle_score_edit(update, context):
 
 
 async def setup_commands(app):
-    """Register the command menu (the «/» button in Telegram)."""
+    """Register the command menu (the «/» button) and reset the Menu Button
+    to show the command list — this overrides any stray BotFather/Web App
+    menu button that may have been set externally."""
     await app.bot.set_my_commands([
         BotCommand("start",    "Welcome and overview"),
         BotCommand("help",     "How to use the bot"),
@@ -1711,6 +1713,13 @@ async def setup_commands(app):
         BotCommand("newfolder", "Create a folder (admins)"),
         BotCommand("delfolder", "Archive a folder (admins)"),
     ])
+    # force the blue Menu Button back to the default "commands" behaviour
+    try:
+        from telegram import MenuButtonCommands
+        await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        logger.info("Menu button reset to commands")
+    except Exception as e:
+        logger.info(f"Could not reset menu button: {e}")
     logger.info("Bot command menu registered")
 
 
