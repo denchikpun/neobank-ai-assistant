@@ -82,6 +82,63 @@ def is_superadmin(update):
     return bool(u) and (u.username or "").lower() == SUPERADMIN
 
 
+def register_user(update):
+    """Remember this user's chat_id in Drive so we can notify them later.
+    Only registers allowed admins (the notification audience)."""
+    if not APPS_SCRIPT_URL:
+        return
+    u = getattr(update, "effective_user", None)
+    chat = getattr(update, "effective_chat", None)
+    if not u or not chat:
+        return
+    uname = (u.username or "").lower()
+    if uname not in ALLOWED_USERNAMES:
+        return
+    try:
+        requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "register_user",
+            "chat_id": chat.id, "username": uname,
+        }, timeout=10)
+    except Exception as e:
+        logger.info(f"register_user failed: {e}")
+
+
+def _get_user(obj):
+    """Works with both Update (effective_user) and CallbackQuery (from_user)."""
+    return getattr(obj, "effective_user", None) or getattr(obj, "from_user", None)
+
+
+def _display_name(update):
+    u = _get_user(update)
+    if not u:
+        return "Someone"
+    return u.first_name or ("@" + u.username if u.username else "Someone")
+
+
+async def notify_admins(context, update, text):
+    """Send a notification to all registered admins except the author."""
+    if not APPS_SCRIPT_URL:
+        return
+    author_user = _get_user(update)
+    author = (getattr(author_user, "username", "") or "").lower()
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "list_users"
+        }, timeout=10)
+        users = resp.json().get("users", {})
+    except Exception as e:
+        logger.info(f"notify list_users failed: {e}")
+        return
+    for uname, chat_id in users.items():
+        if uname == author:
+            continue  # don't notify the person who did the action
+        try:
+            await context.bot.send_message(chat_id=int(chat_id), text=text,
+                                           disable_web_page_preview=True)
+        except Exception as e:
+            logger.info(f"notify to {uname} failed: {e}")
+
+
 def folders_for_prompt():
     """Folder list text for AI classification — includes live sub-folders.
     Falls back to the hardcoded descriptions when scan is unavailable."""
@@ -957,6 +1014,9 @@ async def research(update, context):
             disable_web_page_preview=True
         )
         await update.message.reply_text(chat_preview, disable_web_page_preview=True)
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} ran web research\n"
+            f"🔬 {topic}\n📁 {folder}\n🔗 {drive_url}")
         context.user_data.clear()
     else:
         await update.message.reply_text(f"⚠️ Could not save research: {error}")
@@ -999,6 +1059,7 @@ async def start(update, context):
     if not is_allowed(update):
         await deny(update)
         return
+    register_user(update)
     await update.message.reply_text(
         "👋 *NeoBank Knowledge Agent*\n"
         "_TrustMe Knowledge Base · Groq + Google Drive_\n\n"
@@ -1128,6 +1189,8 @@ async def newfolder_cmd(update, context):
     path, error = create_folder_in_drive(parent_path, name, created_by)
     if path:
         await update.message.reply_text(f"✅ Folder created: {path}\nIt's now available when saving.")
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} created a folder\n📁 {path}")
     else:
         await update.message.reply_text(f"⚠️ Could not create folder: {error}")
 
@@ -1155,6 +1218,8 @@ async def delfolder_cmd(update, context):
             f"✅ Folder moved to _Archive: {path}\n"
             f"Nothing is deleted — it can be restored from _Archive."
         )
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} archived a folder\n📁 {path} → _Archive")
     else:
         await update.message.reply_text(f"⚠️ Could not archive folder: {error}")
 
@@ -1260,6 +1325,9 @@ async def undo(update, context):
             f"Nothing is deleted — items can be restored from _Archive.",
             disable_web_page_preview=True
         )
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} rolled back a document\n"
+            f"📄 {result.get('title', target.get('title'))} → _Archive")
     else:
         await update.message.reply_text(f"⚠️ Could not roll back: {error}")
 
@@ -1302,6 +1370,9 @@ async def rollback(update, context):
             f"Nothing is deleted — items can be restored from _Archive.",
             disable_web_page_preview=True
         )
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} rolled back a document\n"
+            f"📄 {result.get('title','—')} → _Archive")
     else:
         await update.message.reply_text(f"⚠️ Could not roll back: {error}")
 
@@ -1312,6 +1383,7 @@ async def receive_message(update, context):
     if not is_allowed(update):
         await deny(update)
         return
+    register_user(update)
     msg = update.message
     if msg.document or msg.audio:
         f = msg.document or msg.audio
@@ -1466,6 +1538,9 @@ async def _finish_raw(query, context, folder, title, result, error):
             f"✅ Saved without analysis\n📁 {folder}\n📄 {title}\n🔗 {result.get('file_url','')}",
             disable_web_page_preview=True
         )
+        await notify_admins(context, query,
+            f"📢 {_display_name(query)} saved a note (no analysis)\n"
+            f"📄 {title}\n📁 {folder}\n🔗 {result.get('file_url','')}")
     else:
         await query.message.reply_text(f"⚠️ Could not save: {error}")
     context.user_data.clear()
@@ -1523,6 +1598,9 @@ async def button_callback(update, context):
                 msg += f"📎 Original file: {original_url}\n"
             msg += "\nINDEX and CHANGELOG updated."
             await query.message.reply_text(msg, disable_web_page_preview=True)
+            await notify_admins(context, update,
+                f"📢 {_display_name(update)} added a document\n"
+                f"📄 {title}\n📁 {folder}\n🔗 {drive_url}")
         else:
             await query.message.reply_text(
                 f"⚠️ Drive save failed: {error}\n\n"
@@ -1633,6 +1711,9 @@ async def button_callback(update, context):
                     f"✅ File saved (no analysis)\n📁 {folder}\n📄 {stored_title}\n🔗 {drive_url}",
                     disable_web_page_preview=True
                 )
+                await notify_admins(context, update,
+                    f"📢 {_display_name(update)} saved a file (no analysis)\n"
+                    f"📄 {stored_title}\n📁 {folder}\n🔗 {drive_url}")
             else:
                 await query.message.reply_text(f"⚠️ Could not save: {error}")
             context.user_data.clear()
