@@ -534,6 +534,14 @@ MIME_BY_EXT = {
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".ppt":  "application/vnd.ms-powerpoint",
     ".odp":  "application/vnd.oasis.opendocument.presentation",
+    ".ogg":  "audio/ogg",
+    ".oga":  "audio/ogg",
+    ".mp3":  "audio/mpeg",
+    ".wav":  "audio/wav",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".webp": "image/webp",
 }
 
 # Apps Script base64 request cap — keep originals under ~7 MB raw
@@ -780,6 +788,92 @@ async def ask_knowledge_base(update, context):
     if len(full) > 3500:
         full = full[:3500] + "..."
     await update.message.reply_text(full, disable_web_page_preview=True)
+
+
+# ── Voice & Image processing ───────────────────────────────
+
+VISION_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # Groq vision (preview)
+
+
+def transcribe_audio(file_path):
+    """Transcribe an audio file via Groq Whisper (ru/en). Returns (text, error)."""
+    try:
+        with open(file_path, "rb") as f:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_KEY}"},
+                files={"file": (os.path.basename(file_path), f)},
+                data={"model": "whisper-large-v3", "response_format": "text"},
+                timeout=90,
+            )
+        if resp.status_code == 200:
+            text = resp.text.strip()
+            return (text, None) if text else (None, "empty transcript")
+        return None, f"Whisper error {resp.status_code}: {resp.text[:200]}"
+    except Exception as e:
+        return None, str(e)
+
+
+def describe_image(file_path):
+    """Read/describe an image via Groq vision. Auto-detects text vs photo.
+    Returns (text, error)."""
+    try:
+        import base64
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("ascii")
+        ext = os.path.splitext(file_path)[1].lower().lstrip(".") or "jpeg"
+        if ext == "jpg":
+            ext = "jpeg"
+        prompt = (
+            "Look at this image. If it contains text (a document, table, screenshot, "
+            "receipt, etc.), extract ALL the text accurately, preserving structure. "
+            "If it is a photo, chart or diagram with little text, describe what it shows "
+            "in detail. Respond in English. If there is a question or task visible in the "
+            "image, note it clearly at the end as 'DETECTED REQUEST: ...'."
+        )
+        resp = groq_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url",
+                     "image_url": {"url": f"data:image/{ext};base64,{b64}"}},
+                ],
+            }],
+            temperature=0.3,
+        )
+        return resp.choices[0].message.content.strip(), None
+    except Exception as e:
+        return None, str(e)
+
+
+def detect_intent(text):
+    """Decide whether transcribed/extracted text is a QUESTION, a RESEARCH
+    request, or MATERIAL to archive. Returns one of: 'question','research','material'."""
+    prompt = f"""Classify the user's intent from this message (it may be in Russian or English):
+
+"{text[:1500]}"
+
+Return ONLY JSON:
+{{"intent": "question" | "research" | "material"}}
+
+- "question": they are ASKING something that should be answered from our internal knowledge base
+- "research": they explicitly want to gather NEW information from the web on a topic
+- "material": it is information/content to be SAVED into the knowledge base (a note, fact, document, update)
+
+If unsure, choose "material"."""
+    try:
+        resp = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            response_format={"type": "json_object"},
+        )
+        raw = re.sub(r"^```json\s*|^```\s*|\s*```$", "", resp.choices[0].message.content.strip())
+        return json.loads(raw).get("intent", "material")
+    except Exception:
+        return "material"
 
 
 # ── Research feature ───────────────────────────────────────
@@ -1379,6 +1473,102 @@ async def rollback(update, context):
 
 # ── Receive material ──────────────────────────────────────
 
+async def handle_voice(update, context):
+    """Voice message: transcribe → detect intent → answer or save."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    register_user(update)
+    msg = update.message
+    await msg.reply_text("🎙 Transcribing voice message...")
+
+    tg_file = await context.bot.get_file(msg.voice.file_id)
+    fd, tmp_path = tempfile.mkstemp(suffix=".ogg")
+    os.close(fd)
+    await tg_file.download_to_drive(tmp_path)
+
+    transcript, error = transcribe_audio(tmp_path)
+    if error or not transcript:
+        try: os.unlink(tmp_path)
+        except Exception: pass
+        await msg.reply_text(f"⚠️ Couldn't transcribe: {error or 'empty'}")
+        return ConversationHandler.END
+
+    await msg.reply_text(f"📝 Transcript:\n_{transcript[:1500]}_", parse_mode="Markdown")
+    intent = detect_intent(transcript)
+
+    if intent == "question":
+        await msg.reply_text("💡 Sounds like a question — searching the knowledge base...")
+        update.message.text = "Help, " + transcript
+        try: os.unlink(tmp_path)
+        except Exception: pass
+        await ask_knowledge_base(update, context)
+        return ConversationHandler.END
+    if intent == "research":
+        await msg.reply_text("🔬 Sounds like a research request — gathering sources...")
+        update.message.text = "Research: " + transcript
+        try: os.unlink(tmp_path)
+        except Exception: pass
+        await research(update, context)
+        return ConversationHandler.END
+
+    await msg.reply_text("💾 Saving as material. What should I focus on? Send focus or /skip.")
+    stored = make_filename("Voice_note")
+    context.user_data.update({
+        "pending_source": "Voice message", "pending_type": "voice_material",
+        "pending_text": transcript, "pending_original_path": tmp_path,
+        "pending_original_name": stored + ".ogg",
+    })
+    return WAITING_FOCUS
+
+
+async def handle_photo(update, context):
+    """Photo/image: read via vision → detect if it's a request → answer or save."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    register_user(update)
+    msg = update.message
+    await msg.reply_text("🖼 Reading the image...")
+
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+        ext = ".jpg"
+    else:
+        file_id = msg.document.file_id
+        ext = os.path.splitext(msg.document.file_name or "img.jpg")[1] or ".jpg"
+
+    tg_file = await context.bot.get_file(file_id)
+    fd, tmp_path = tempfile.mkstemp(suffix=ext)
+    os.close(fd)
+    await tg_file.download_to_drive(tmp_path)
+
+    extracted, error = describe_image(tmp_path)
+    if error or not extracted:
+        try: os.unlink(tmp_path)
+        except Exception: pass
+        await msg.reply_text(f"⚠️ Couldn't read the image: {error or 'empty'}")
+        return ConversationHandler.END
+
+    await msg.reply_text(f"📄 Extracted:\n{extracted[:1500]}", disable_web_page_preview=True)
+
+    if "DETECTED REQUEST:" in extracted:
+        req = extracted.split("DETECTED REQUEST:", 1)[1].strip()
+        if req:
+            await msg.reply_text("💡 The image contains a request — searching the knowledge base...")
+            update.message.text = "Help, " + req
+            await ask_knowledge_base(update, context)
+
+    await msg.reply_text("💾 Saving the image as material. Send focus or /skip.")
+    stored = make_filename("Image")
+    context.user_data.update({
+        "pending_source": "Image", "pending_type": "image_material",
+        "pending_text": extracted, "pending_original_path": tmp_path,
+        "pending_original_name": stored + ext,
+    })
+    return WAITING_FOCUS
+
+
 async def receive_message(update, context):
     if not is_allowed(update):
         await deny(update)
@@ -1440,32 +1630,28 @@ async def receive_focus(update, context):
             content = fetch_url_content(url)
         elif ptype == "text":
             content = context.user_data["pending_text"]
-        elif ptype in ("file", "voice"):
+        elif ptype in ("voice_material", "image_material"):
+            # transcript / image description already extracted; original file kept
+            content = context.user_data.get("pending_text", "")
+        elif ptype == "file":
             tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
             orig_name = context.user_data.get("pending_file_name", "file.txt")
-            # preserve the real extension so extraction routes correctly,
-            # and use a closed path so bytes are fully flushed before reading
             ext = os.path.splitext(orig_name)[1] or ".bin"
             fd, tmp_path = tempfile.mkstemp(suffix=ext)
             os.close(fd)
             await tg_file.download_to_drive(tmp_path)
-            if ptype == "voice":
-                await update.message.reply_text(
-                    "🎙 I can't transcribe voice messages yet. Please send text, a link, or a file."
-                )
-                os.unlink(tmp_path)
-                return ConversationHandler.END
-            else:
-                content = extract_file_content(tmp_path, orig_name)
+            content = extract_file_content(tmp_path, orig_name)
             # for structural formats, keep the original file until save; else delete now
-            if ptype == "file" and is_structural_file(orig_name) and content:
+            if is_structural_file(orig_name) and content:
                 context.user_data["pending_original_path"] = tmp_path
                 context.user_data["pending_original_name"] = orig_name
             else:
                 os.unlink(tmp_path)
 
-        # fetch/extract failed or returned nothing usable — stop, don't save junk
-        if not content or len(content.strip()) < 50:
+        # fetch/extract failed or returned nothing usable — stop, don't save junk.
+        # voice/image/text already have validated content; use a small floor for them.
+        floor = 3 if ptype in ("voice_material", "image_material", "text") else 50
+        if not content or len(content.strip()) < floor:
             if ptype == "url":
                 await update.message.reply_text(
                     "⚠️ I couldn't read that page. It may block automated access, require login, "
@@ -1482,7 +1668,7 @@ async def receive_focus(update, context):
             return ConversationHandler.END
 
         # guard against unreadable markup/binary that would make the AI hallucinate
-        if looks_like_garbage(content):
+        if ptype not in ("voice_material", "image_material") and looks_like_garbage(content):
             await update.message.reply_text(
                 "⚠️ I could open the file but the content came out as formatting codes, "
                 "not readable text — so I won't guess at a summary.\n\n"
@@ -1812,12 +1998,17 @@ def main():
     # «Research: ...» — web research compiled into a document
     research_filter = filters.TEXT & filters.Regex(r"(?i)^\s*research[:\s]")
 
+    # image documents (png/jpg sent as file) route to the photo handler
+    image_doc_filter = filters.Document.MimeType("image/png") | filters.Document.MimeType("image/jpeg") | filters.Document.MimeType("image/webp")
+
     conv = ConversationHandler(
         entry_points=[
             MessageHandler(filters.TEXT & ~filters.COMMAND & ~pomogi_filter & ~research_filter, receive_message),
-            MessageHandler(filters.Document.ALL,             receive_message),
-            MessageHandler(filters.VOICE,                    receive_message),
-            MessageHandler(filters.AUDIO,                    receive_message),
+            MessageHandler(filters.PHOTO,                    handle_photo),
+            MessageHandler(image_doc_filter,                 handle_photo),
+            MessageHandler(filters.Document.ALL & ~image_doc_filter, receive_message),
+            MessageHandler(filters.VOICE,                    handle_voice),
+            MessageHandler(filters.AUDIO,                    handle_voice),
         ],
         states={WAITING_FOCUS: [MessageHandler(filters.TEXT & ~pomogi_filter & ~research_filter, receive_focus)]},
         fallbacks=[CommandHandler("skip", receive_focus)],
