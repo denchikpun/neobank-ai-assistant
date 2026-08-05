@@ -746,7 +746,11 @@ async def ask_knowledge_base(update, context, override_text=None):
         await update.message.reply_text(f"⚠️ Could not read INDEX: {error}")
         return
     if not index_docs:
-        await update.message.reply_text("The knowledge base is empty — nothing to search.")
+        await update.message.reply_text(
+            "The index returned no readable rows.\n"
+            "If documents exist, their INDEX_Brief rows may be missing a document link, "
+            "or the bot points at a different INDEX_Brief than where they were saved."
+        )
         return
 
     # Step 2 — pick relevant
