@@ -1299,6 +1299,31 @@ async def newfolder_cmd(update, context):
         await update.message.reply_text(f"⚠️ Could not create folder: {error}")
 
 
+async def toc_cmd(update, context):
+    """/toc — rebuild the table of contents in both index documents."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    await update.message.reply_text("📑 Rebuilding the table of contents...")
+    if not APPS_SCRIPT_URL:
+        await update.message.reply_text("⚠️ Apps Script not configured.")
+        return
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "rebuild_toc"
+        }, timeout=60)
+        result = resp.json()
+        if result.get("ok"):
+            await update.message.reply_text(
+                f"✅ Table of contents rebuilt.\n{result.get('result','')}\n\n"
+                "Check INDEX_Brief (short) and INDEX_Detailed (full)."
+            )
+        else:
+            await update.message.reply_text(f"⚠️ Could not rebuild: {result.get('error','unknown')}")
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
+
+
 async def delfolder_cmd(update, context):
     """/delfolder <Full/Path> — archives a folder (superadmin any, admin only own)."""
     if not is_allowed(update):
@@ -1986,6 +2011,7 @@ async def setup_commands(app):
         BotCommand("rollback", "Roll back a document by ID"),
         BotCommand("newfolder", "Create a folder (admins)"),
         BotCommand("delfolder", "Archive a folder (admins)"),
+        BotCommand("toc", "Rebuild table of contents"),
     ])
     # force the blue Menu Button back to the default "commands" behaviour
     try:
@@ -2028,6 +2054,7 @@ def main():
     app.add_handler(CommandHandler("rollback", rollback))
     app.add_handler(CommandHandler("newfolder", newfolder_cmd))
     app.add_handler(CommandHandler("delfolder", delfolder_cmd))
+    app.add_handler(CommandHandler("toc", toc_cmd))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     # web research — before conv
