@@ -723,12 +723,12 @@ Answer in English (even if the documents or question are in another language), t
     return response.choices[0].message.content.strip()
 
 
-async def ask_knowledge_base(update, context):
+async def ask_knowledge_base(update, context, override_text=None):
     """Handle a 'Help, ...' question — search and answer from the knowledge base."""
     if not is_allowed(update):
         await deny(update)
         return
-    text = update.message.text.strip()
+    text = (override_text if override_text is not None else (update.message.text or "")).strip()
     # remove the 'Help' trigger and leading punctuation
     question = re.sub(r"^help[,!\s]*", "", text, flags=re.IGNORECASE).strip()
     if not question:
@@ -1027,12 +1027,12 @@ def save_research_to_drive(data, source, content):
         return None, None, str(e)
 
 
-async def research(update, context):
+async def research(update, context, override_text=None):
     """Handle 'Research: <topic>' — web research compiled into a Drive document."""
     if not is_allowed(update):
         await deny(update)
         return
-    text = update.message.text.strip()
+    text = (override_text if override_text is not None else (update.message.text or "")).strip()
     topic = re.sub(r"^research[:,!\s]*", "", text, flags=re.IGNORECASE).strip()
     user_material = context.user_data.get("pending_text", "") or ""
 
@@ -1499,17 +1499,15 @@ async def handle_voice(update, context):
 
     if intent == "question":
         await msg.reply_text("💡 Sounds like a question — searching the knowledge base...")
-        update.message.text = "Help, " + transcript
         try: os.unlink(tmp_path)
         except Exception: pass
-        await ask_knowledge_base(update, context)
+        await ask_knowledge_base(update, context, override_text="Help, " + transcript)
         return ConversationHandler.END
     if intent == "research":
         await msg.reply_text("🔬 Sounds like a research request — gathering sources...")
-        update.message.text = "Research: " + transcript
         try: os.unlink(tmp_path)
         except Exception: pass
-        await research(update, context)
+        await research(update, context, override_text="Research: " + transcript)
         return ConversationHandler.END
 
     await msg.reply_text("💾 Saving as material. What should I focus on? Send focus or /skip.")
@@ -1556,8 +1554,7 @@ async def handle_photo(update, context):
         req = extracted.split("DETECTED REQUEST:", 1)[1].strip()
         if req:
             await msg.reply_text("💡 The image contains a request — searching the knowledge base...")
-            update.message.text = "Help, " + req
-            await ask_knowledge_base(update, context)
+            await ask_knowledge_base(update, context, override_text="Help, " + req)
 
     await msg.reply_text("💾 Saving the image as material. Send focus or /skip.")
     stored = make_filename("Image")
