@@ -649,7 +649,13 @@ def fetch_index_list():
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "list_index"
         }, timeout=30)
-        result = resp.json()
+        try:
+            result = resp.json()
+        except Exception:
+            # not JSON — surface the raw response so we can see what Apps Script returned
+            snippet = resp.text[:300].replace("\n", " ")
+            logger.info(f"list_index non-JSON [{resp.status_code}]: {snippet}")
+            return None, f"[{resp.status_code}] non-JSON response: {snippet}"
         if result.get("ok"):
             return result.get("docs", []), None
         return None, result.get("error", "Unknown error")
