@@ -1312,7 +1312,16 @@ async def toc_cmd(update, context):
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "rebuild_toc"
         }, timeout=60)
-        result = resp.json()
+        try:
+            result = resp.json()
+        except Exception:
+            snippet = resp.text[:300].replace("\n", " ")
+            await update.message.reply_text(
+                f"⚠️ Apps Script returned non-JSON [{resp.status_code}].\n"
+                f"This means the new script version isn't deployed.\n\n"
+                f"Raw start: {snippet}"
+            )
+            return
         if result.get("ok"):
             await update.message.reply_text(
                 f"✅ Table of contents rebuilt.\n{result.get('result','')}\n\n"
