@@ -471,7 +471,23 @@ Return ONLY this JSON:
   "date": "{today}"
 }}
 
-Rules: importance 9-10 only for Sharia/strategy/foundational; credibility 4-6 for interviews/podcasts/social; 3-7 insights; all English."""
+Scoring rules — follow these scales exactly (from the agent's operating rules):
+
+IMPORTANCE (1-10):
+- 9-10 Critical: Sharia standards, company strategy, foundational decisions
+- 7-8  High: key research, product decisions, competitive analysis
+- 5-6  Medium: industry trends, useful background, supporting data
+- 3-4  Low: general context, tangential information
+- 1-2  Minimal: archival reference only
+
+CREDIBILITY (1-10) — judge by SOURCE TYPE:
+- 9-10 Official/Regulatory: AAOIFI, IFSB, regulatory docs, internal team decisions
+- 7-8  Academic: peer-reviewed articles, analytical agency reports
+- 5-7  Media/Publications: business media, authoritative industry blogs
+- 4-6  Interview/Podcast: single expert opinion (reduce accordingly)
+- 1-3  Social/Forums: Twitter, LinkedIn, forums (requires verification)
+
+Other rules: 3-7 key insights; every output field in English."""
 
     response = groq_client.chat.completions.create(
         model=MODEL,
@@ -1311,7 +1327,7 @@ async def toc_cmd(update, context):
     try:
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "rebuild_toc"
-        }, timeout=60)
+        }, timeout=180)
         try:
             result = resp.json()
         except Exception:
