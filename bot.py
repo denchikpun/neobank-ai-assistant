@@ -1316,6 +1316,34 @@ async def newfolder_cmd(update, context):
         await update.message.reply_text(f"⚠️ Could not create folder: {error}")
 
 
+async def whoisregistered_cmd(update, context):
+    """/whoisregistered — show who is on the notification list (diagnostic)."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    # ensure the caller is registered right now
+    register_user(update)
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "list_users"
+        }, timeout=10)
+        users = resp.json().get("users", {})
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not read the list: {e}")
+        return
+    if not users:
+        await update.message.reply_text(
+            "📭 No one is registered for notifications yet.\n\n"
+            "Each admin must send the bot a message (e.g. /start) once so the bot "
+            "learns their chat. Ask the team to do that, then check again."
+        )
+        return
+    lines = "\n".join([f"• {u}" for u in users.keys()])
+    await update.message.reply_text(
+        f"🔔 Registered for notifications ({len(users)}):\n{lines}"
+    )
+
+
 async def toc_cmd(update, context):
     """/toc — rebuild the table of contents in both index documents."""
     if not is_allowed(update):
@@ -2135,6 +2163,7 @@ def main():
     app.add_handler(CommandHandler("newfolder", newfolder_cmd))
     app.add_handler(CommandHandler("delfolder", delfolder_cmd))
     app.add_handler(CommandHandler("toc", toc_cmd))
+    app.add_handler(CommandHandler("whoisregistered", whoisregistered_cmd))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     # web research — before conv
