@@ -29,7 +29,65 @@ ALLOWED_USERNAMES = set(
 # superadmin can delete any folder; admins can delete only folders they created
 SUPERADMIN = os.environ.get("SUPERADMIN_USERNAME", "denya951").strip().lstrip("@").lower()
 
+# Google Drive API (migration) — optional; when set, enables direct Drive access
+GOOGLE_SA_JSON = os.environ.get("GOOGLE_SA_JSON", "")
+SHARED_DRIVE_FOLDER_ID = os.environ.get("SHARED_DRIVE_FOLDER_ID", "")
+
 groq_client = Groq(api_key=GROQ_KEY)
+
+
+def get_drive_service():
+    """Build a Google Drive API client from the Service Account JSON.
+    Returns (service, error). service is None if not configured or failed."""
+    if not GOOGLE_SA_JSON:
+        return None, "GOOGLE_SA_JSON not set"
+    try:
+        import json as _json
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        info = _json.loads(GOOGLE_SA_JSON)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive"]
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        return service, None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def drive_api_selftest():
+    """Read+write test against SHARED_DRIVE_FOLDER_ID. Returns a result string."""
+    service, err = get_drive_service()
+    if err:
+        return f"❌ Drive API not ready: {err}"
+    if not SHARED_DRIVE_FOLDER_ID:
+        return "❌ SHARED_DRIVE_FOLDER_ID not set"
+    # read test
+    try:
+        resp = service.files().list(
+            q=f"'{SHARED_DRIVE_FOLDER_ID}' in parents and trashed=false",
+            fields="files(id, name)", pageSize=5,
+            supportsAllDrives=True, includeItemsFromAllDrives=True,
+        ).execute()
+        n = len(resp.get("files", []))
+    except Exception as e:
+        return f"❌ READ failed: {type(e).__name__}: {str(e)[:200]}"
+    # write test
+    try:
+        import io
+        from googleapiclient.http import MediaIoBaseUpload
+        content = io.BytesIO(b"TrustMe Drive API test - write ok")
+        media = MediaIoBaseUpload(content, mimetype="text/plain", resumable=True)
+        created = service.files().create(
+            body={"name": "trustme_drive_api_test.txt", "parents": [SHARED_DRIVE_FOLDER_ID]},
+            media_body=media, fields="id, webViewLink", supportsAllDrives=True,
+        ).execute()
+        return (f"✅ Drive API works!\n"
+                f"Read: saw {n} item(s)\n"
+                f"Write: created test file\n"
+                f"{created.get('webViewLink')}")
+    except Exception as e:
+        return f"⚠️ READ ok but WRITE failed: {type(e).__name__}: {str(e)[:200]}"
 MODEL = "llama-3.3-70b-versatile"
 
 WAITING_FOCUS = 1
@@ -1368,6 +1426,16 @@ async def whoisregistered_cmd(update, context):
     )
 
 
+async def drivetest_cmd(update, context):
+    """/drivetest — verify direct Google Drive API access (migration check)."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    await update.message.reply_text("🔌 Testing direct Google Drive API connection...")
+    result = drive_api_selftest()
+    await update.message.reply_text(result, disable_web_page_preview=True)
+
+
 async def toc_cmd(update, context):
     """/toc — rebuild the table of contents in both index documents."""
     if not is_allowed(update):
@@ -2198,6 +2266,7 @@ def main():
     app.add_handler(CommandHandler("toc", toc_cmd))
     app.add_handler(CommandHandler("whoisregistered", whoisregistered_cmd))
     app.add_handler(CommandHandler("testnotify", testnotify_cmd))
+    app.add_handler(CommandHandler("drivetest", drivetest_cmd))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     # web research — before conv
