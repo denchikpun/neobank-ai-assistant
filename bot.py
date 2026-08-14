@@ -560,8 +560,8 @@ MIME_BY_EXT = {
     ".webp": "image/webp",
 }
 
-# Apps Script base64 request cap — keep originals under ~7 MB raw
-MAX_ORIGINAL_BYTES = 7 * 1024 * 1024
+# Apps Script base64 request cap — keep originals under ~30 MB raw
+MAX_ORIGINAL_BYTES = 30 * 1024 * 1024  # ~30 MB — practical ceiling for Apps Script base64 transfer
 
 
 def is_structural_file(filename):
@@ -579,7 +579,8 @@ def make_filename(base_title, version="V1.0"):
     return f"{base}_{version}_{date}"
 
 
-def save_file_only_to_drive(folder, title, file_path, file_name, source):
+def save_file_only_to_drive(folder, title, file_path, file_name, source,
+                            importance=0, credibility=0):
     """Save just the original file to Drive (no analysis doc)."""
     if not APPS_SCRIPT_URL:
         return None, None, "Apps Script URL not configured"
@@ -587,7 +588,7 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source):
         import base64
         size = os.path.getsize(file_path)
         if size > MAX_ORIGINAL_BYTES:
-            return None, None, f"file too large ({size // (1024*1024)} MB > 7 MB)"
+            return None, None, f"file too large ({size // (1024*1024)} MB > 30 MB)"
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         ext = os.path.splitext(file_name)[1].lower()
@@ -602,8 +603,8 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source):
             "date": datetime.now().strftime("%Y-%m-%d"),
             "version": "V1.0",
             "source": source,
-            "importance": 0,
-            "credibility": 0,
+            "importance": importance,
+            "credibility": credibility,
             "hashtags": ["#raw_unprocessed"],
         }
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=90)
@@ -624,7 +625,7 @@ def save_with_original_to_drive(data, source, content, file_path, file_name):
         import base64
         size = os.path.getsize(file_path)
         if size > MAX_ORIGINAL_BYTES:
-            return None, None, None, f"file too large to store original ({size // (1024*1024)} MB > 7 MB)"
+            return None, None, None, f"file too large to store original ({size // (1024*1024)} MB > 30 MB)"
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         ext = os.path.splitext(file_name)[1].lower()
@@ -1662,6 +1663,10 @@ async def receive_message(update, context):
 async def receive_focus(update, context):
     if not is_allowed(update):
         return ConversationHandler.END
+    # if a raw file is waiting for scores, handle that instead of treating text as focus
+    if context.user_data.get("raw_pending"):
+        await handle_score_edit(update, context)
+        return ConversationHandler.END
     focus = "" if update.message.text.strip().startswith("/skip") else update.message.text.strip()
     await update.message.reply_text("⏳ Analysing...")
 
@@ -1930,36 +1935,26 @@ async def button_callback(update, context):
             return
 
         if ptype == "file":
-            # download the file, then save the file itself (no analysis doc)
+            # download now, keep it, then ask for scores before saving
             tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
             ext = os.path.splitext(fname)[1] or ".bin"
             fd, tmp_path = tempfile.mkstemp(suffix=ext)
             os.close(fd)
             await tg_file.download_to_drive(tmp_path)
 
-            stored_title = make_filename(fname or "Uploaded_file")
-            drive_url, file_id, error = save_file_only_to_drive(
-                folder, stored_title, tmp_path, fname, src
+            context.user_data["raw_pending"] = {
+                "folder": folder,
+                "tmp_path": tmp_path,
+                "fname": fname,
+                "src": src,
+            }
+            await query.message.reply_text(
+                f"📁 Folder: {folder}\n\n"
+                "Before saving, set the scores. Send them as two numbers 1–10:\n"
+                "`importance credibility`  — for example  `7 8`\n\n"
+                "Or send `skip` to save without scores.",
+                parse_mode="Markdown"
             )
-            try: os.unlink(tmp_path)
-            except Exception: pass
-
-            if drive_url:
-                context.bot_data.setdefault("docs", []).append({
-                    "title": stored_title, "folder": folder, "importance": "—", "credibility": "—",
-                    "date": datetime.now().strftime("%Y-%m-%d"), "source": src,
-                    "drive_url": drive_url, "file_id": file_id or "", "original_id": "",
-                })
-                await query.message.reply_text(
-                    f"✅ File saved (no analysis)\n📁 {folder}\n📄 {stored_title}\n🔗 {drive_url}",
-                    disable_web_page_preview=True
-                )
-                await notify_admins(context, update,
-                    f"📢 {_display_name(update)} saved a file (no analysis)\n"
-                    f"📄 {stored_title}\n📁 {folder}\n🔗 {drive_url}")
-            else:
-                await query.message.reply_text(f"⚠️ Could not save: {error}")
-            context.user_data.clear()
             return
 
     elif query.data.startswith("folder_"):
@@ -1968,8 +1963,68 @@ async def button_callback(update, context):
                                        parse_mode="Markdown")
 
 
+async def complete_raw_file_save(update, context, importance, credibility):
+    """Finish a raw file save once scores are provided (or skipped)."""
+    rp = context.user_data.get("raw_pending")
+    if not rp:
+        return
+    folder   = rp["folder"]
+    tmp_path = rp["tmp_path"]
+    fname    = rp["fname"]
+    src      = rp["src"]
+
+    stored_title = make_filename(fname or "Uploaded_file")
+    await update.message.reply_text(f"💾 Saving to {folder}...")
+    drive_url, file_id, error = save_file_only_to_drive(
+        folder, stored_title, tmp_path, fname, src,
+        importance=importance, credibility=credibility
+    )
+    try: os.unlink(tmp_path)
+    except Exception: pass
+
+    if drive_url:
+        context.bot_data.setdefault("docs", []).append({
+            "title": stored_title, "folder": folder,
+            "importance": importance or "—", "credibility": credibility or "—",
+            "date": datetime.now().strftime("%Y-%m-%d"), "source": src,
+            "drive_url": drive_url, "file_id": file_id or "", "original_id": "",
+        })
+        sc = f"⭐️{importance}/10  ✅{credibility}/10" if importance else "no scores"
+        await update.message.reply_text(
+            f"✅ File saved\n📁 {folder}\n📄 {stored_title}\n{sc}\n🔗 {drive_url}",
+            disable_web_page_preview=True
+        )
+        await notify_admins(context, update,
+            f"📢 {_display_name(update)} saved a file\n"
+            f"📄 {stored_title}\n📁 {folder}\n🔗 {drive_url}")
+    else:
+        await update.message.reply_text(f"⚠️ Could not save: {error}")
+    context.user_data.clear()
+
+
 async def handle_score_edit(update, context):
     if not is_allowed(update):
+        return
+    # raw file waiting for scores?
+    rp = context.user_data.get("raw_pending")
+    if rp:
+        text = update.message.text.strip().lower()
+        if text.startswith("/skip") or text == "skip":
+            await complete_raw_file_save(update, context, 0, 0)
+            return
+        m = re.match(r"(\d+)\s+(\d+)", text)
+        if m:
+            imp, cred = int(m.group(1)), int(m.group(2))
+            if not (1 <= imp <= 10 and 1 <= cred <= 10):
+                await update.message.reply_text("⚠️ Both scores must be 1–10. Try again, e.g. `7 8`.",
+                                                parse_mode="Markdown")
+                return
+            await complete_raw_file_save(update, context, imp, cred)
+        else:
+            await update.message.reply_text(
+                "Send two numbers 1–10: `importance credibility` (e.g. `7 8`), or /skip.",
+                parse_mode="Markdown"
+            )
         return
     text = update.message.text.strip().lower()
     pd   = context.user_data.get("pending_data")
