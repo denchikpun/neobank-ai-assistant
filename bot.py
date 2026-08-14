@@ -616,7 +616,7 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source,
             "credibility": credibility,
             "hashtags": ["#raw_unprocessed"],
         }
-        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=90)
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
         logger.info(f"save_file_only response [{resp.status_code}]: {resp.text[:300]}")
         result = resp.json()
         if result.get("ok"):
@@ -658,7 +658,7 @@ def save_with_original_to_drive(data, source, content, file_path, file_name):
             "file_name": file_name,
             "mime_type": MIME_BY_EXT.get(ext, "application/octet-stream"),
         }
-        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=90)
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
         logger.info(f"create_with_file response [{resp.status_code}]: {resp.text[:400]}")
         result = resp.json()
         if result.get("ok"):
@@ -1962,7 +1962,6 @@ async def button_callback(update, context):
 
     elif query.data.startswith("rawfolder_"):
         folder = query.data[len("rawfolder_"):]
-        await query.edit_message_text(f"📥 Saving to {folder} without analysis...")
 
         ptype = context.user_data.get("pending_type")
         fname = context.user_data.get("pending_file_name", "")
@@ -2026,7 +2025,17 @@ async def complete_raw_file_save(update, context, importance, credibility):
     src      = rp["src"]
 
     stored_title = make_filename(fname or "Uploaded_file")
-    await update.message.reply_text(f"💾 Saving to {folder}...")
+    try:
+        size_mb = os.path.getsize(tmp_path) / (1024 * 1024)
+    except Exception:
+        size_mb = 0
+    if size_mb > 10:
+        await update.message.reply_text(
+            f"💾 Saving to {folder}...\n"
+            f"⏳ This is a large file ({size_mb:.0f} MB) — it may take 2–5 minutes. Please wait."
+        )
+    else:
+        await update.message.reply_text(f"💾 Saving to {folder}...")
     drive_url, file_id, error = save_file_only_to_drive(
         folder, stored_title, tmp_path, fname, src,
         importance=importance, credibility=credibility
