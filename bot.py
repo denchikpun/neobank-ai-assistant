@@ -116,9 +116,10 @@ def _display_name(update):
 
 
 async def notify_admins(context, update, text):
-    """Send a notification to all registered admins except the author."""
+    """Send a notification to all registered admins except the author.
+    Returns a short diagnostic string (sent count / errors)."""
     if not APPS_SCRIPT_URL:
-        return
+        return "no apps script url"
     author_user = _get_user(update)
     author = (getattr(author_user, "username", "") or "").lower()
     try:
@@ -128,15 +129,23 @@ async def notify_admins(context, update, text):
         users = resp.json().get("users", {})
     except Exception as e:
         logger.info(f"notify list_users failed: {e}")
-        return
+        return f"list_users failed: {e}"
+    sent, errors = 0, []
     for uname, chat_id in users.items():
         if uname == author:
             continue  # don't notify the person who did the action
         try:
             await context.bot.send_message(chat_id=int(chat_id), text=text,
                                            disable_web_page_preview=True)
+            sent += 1
         except Exception as e:
-            logger.info(f"notify to {uname} failed: {e}")
+            errors.append(f"{uname}: {str(e)[:80]}")
+            logger.info(f"notify to {uname} ({chat_id}) failed: {e}")
+    diag = f"notified {sent}"
+    if errors:
+        diag += " | errors: " + "; ".join(errors)
+    logger.info(f"notify_admins: {diag}")
+    return diag
 
 
 def folders_for_prompt():
@@ -1316,6 +1325,21 @@ async def newfolder_cmd(update, context):
         await update.message.reply_text(f"⚠️ Could not create folder: {error}")
 
 
+async def testnotify_cmd(update, context):
+    """/testnotify — send a test notification to the other admins and report the result."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    register_user(update)
+    diag = await notify_admins(context, update,
+        f"🔔 Test notification from {_display_name(update)}. If you see this, notifications work.")
+    await update.message.reply_text(
+        f"Test sent.\nResult: {diag}\n\n"
+        "If it says 'notified 0' with no errors, only you are registered right now, "
+        "or the others are the ones who should receive it. Ask another admin to run /testnotify too."
+    )
+
+
 async def whoisregistered_cmd(update, context):
     """/whoisregistered — show who is on the notification list (diagnostic)."""
     if not is_allowed(update):
@@ -2164,6 +2188,7 @@ def main():
     app.add_handler(CommandHandler("delfolder", delfolder_cmd))
     app.add_handler(CommandHandler("toc", toc_cmd))
     app.add_handler(CommandHandler("whoisregistered", whoisregistered_cmd))
+    app.add_handler(CommandHandler("testnotify", testnotify_cmd))
     # knowledge base question — before conv, to intercept first
     app.add_handler(MessageHandler(pomogi_filter, ask_knowledge_base))
     # web research — before conv
