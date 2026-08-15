@@ -62,6 +62,31 @@ def drive_api_selftest():
         return f"❌ Drive API not ready: {err}"
     if not SHARED_DRIVE_FOLDER_ID:
         return "❌ SHARED_DRIVE_FOLDER_ID not set"
+
+    # identify what this ID actually is
+    info_line = ""
+    is_shared_drive_root = False
+    try:
+        meta = service.files().get(
+            fileId=SHARED_DRIVE_FOLDER_ID,
+            fields="id, name, mimeType, driveId, parents, capabilities(canAddChildren)",
+            supportsAllDrives=True,
+        ).execute()
+        is_shared_drive_root = (meta.get("mimeType") == "application/vnd.google-apps.folder"
+                                and not meta.get("parents")
+                                and meta.get("driveId") == SHARED_DRIVE_FOLDER_ID)
+        info_line = (f"ID is: {meta.get('name')} | type={meta.get('mimeType')} | "
+                     f"driveId={meta.get('driveId','none')} | "
+                     f"canAddChildren={meta.get('capabilities',{}).get('canAddChildren')}")
+    except Exception:
+        # a Shared Drive root often isn't returned by files().get — try drives().get
+        try:
+            d = service.drives().get(driveId=SHARED_DRIVE_FOLDER_ID).execute()
+            is_shared_drive_root = True
+            info_line = f"ID is a SHARED DRIVE root: {d.get('name')}"
+        except Exception as e2:
+            info_line = f"could not identify ID: {str(e2)[:150]}"
+
     # read test
     try:
         resp = service.files().list(
@@ -71,23 +96,43 @@ def drive_api_selftest():
         ).execute()
         n = len(resp.get("files", []))
     except Exception as e:
-        return f"❌ READ failed: {type(e).__name__}: {str(e)[:200]}"
+        return f"❌ READ failed: {type(e).__name__}: {str(e)[:200]}\n\n{info_line}"
+
     # write test
     try:
         import io
         from googleapiclient.http import MediaIoBaseUpload
         content = io.BytesIO(b"TrustMe Drive API test - write ok")
-        media = MediaIoBaseUpload(content, mimetype="text/plain", resumable=True)
+        media = MediaIoBaseUpload(content, mimetype="text/plain", resumable=False)
+        body = {"name": "trustme_drive_api_test.txt", "parents": [SHARED_DRIVE_FOLDER_ID]}
         created = service.files().create(
-            body={"name": "trustme_drive_api_test.txt", "parents": [SHARED_DRIVE_FOLDER_ID]},
-            media_body=media, fields="id, webViewLink", supportsAllDrives=True,
+            body=body, media_body=media, fields="id, webViewLink",
+            supportsAllDrives=True,
         ).execute()
         return (f"✅ Drive API works!\n"
                 f"Read: saw {n} item(s)\n"
                 f"Write: created test file\n"
-                f"{created.get('webViewLink')}")
+                f"{created.get('webViewLink')}\n\n{info_line}")
     except Exception as e:
-        return f"⚠️ READ ok but WRITE failed: {type(e).__name__}: {str(e)[:200]}"
+        # list the Shared Drives the Service Account is actually a member of
+        member_of = ""
+        try:
+            drives = service.drives().list(pageSize=20, fields="drives(id,name)").execute()
+            ds = drives.get("drives", [])
+            if ds:
+                member_of = "\n\nService Account is a member of these Shared Drives:\n" + \
+                    "\n".join([f"• {d['name']} (id: {d['id']})" for d in ds])
+            else:
+                member_of = ("\n\n⚠️ Service Account is a member of NO Shared Drives. "
+                             "It was shared the folder directly, not added to the Drive. "
+                             "Add it via the Shared Drive's Manage Members.")
+        except Exception as e2:
+            member_of = f"\n\n(could not list drives: {str(e2)[:120]})"
+        hint = ""
+        if is_shared_drive_root:
+            hint = "\n\n💡 This is the Drive ROOT — use a folder inside it instead."
+        return (f"⚠️ READ ok but WRITE failed: {type(e).__name__}: {str(e)[:200]}\n\n"
+                f"{info_line}{hint}{member_of}")
 MODEL = "llama-3.3-70b-versatile"
 
 WAITING_FOCUS = 1
