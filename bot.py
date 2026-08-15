@@ -1477,6 +1477,19 @@ async def drivetest_cmd(update, context):
         await deny(update)
         return
     await update.message.reply_text("🔌 Testing direct Google Drive API connection...")
+    # show which Service Account identity we're using
+    try:
+        import json as _json
+        info = _json.loads(GOOGLE_SA_JSON) if GOOGLE_SA_JSON else {}
+        sa_email = info.get("client_email", "(no client_email in key)")
+        await update.message.reply_text(
+            f"🔑 Using Service Account:\n`{sa_email}`\n\n"
+            "This exact email must be a MEMBER of the Shared Drive (via Manage Members of the "
+            "drive itself, not folder sharing).",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Could not read key: {e}")
     result = drive_api_selftest()
     await update.message.reply_text(result, disable_web_page_preview=True)
 
