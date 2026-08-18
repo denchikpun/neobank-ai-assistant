@@ -1494,6 +1494,53 @@ async def drivetest_cmd(update, context):
     await update.message.reply_text(result, disable_web_page_preview=True)
 
 
+async def setscore_cmd(update, context):
+    """/setscore <doc-id or "exact title"> <importance> <credibility>
+    Updates a document's scores in the registry so /toc keeps them."""
+    if not is_allowed(update):
+        await deny(update)
+        return
+    text = (update.message.text or "").strip()
+    # strip the command word
+    rest = text.split(None, 1)[1] if len(text.split(None, 1)) > 1 else ""
+    # scores are the last two integers; key is everything before them
+    m = re.match(r'^(.*?)(?:\s+)(\d+)\s+(\d+)\s*$', rest)
+    if not m:
+        await update.message.reply_text(
+            "Usage:\n`/setscore <doc-id or exact title> <importance> <credibility>`\n\n"
+            "Examples:\n"
+            "`/setscore 1AbC...xyz 8 9`  (by document ID from its link)\n"
+            "`/setscore Fasset_Analysis_V1.0_2026-08-17 8 9`  (by exact title)",
+            parse_mode="Markdown"
+        )
+        return
+    key = m.group(1).strip().strip('"').strip("'")
+    imp, cred = int(m.group(2)), int(m.group(3))
+    if not (1 <= imp <= 10 and 1 <= cred <= 10):
+        await update.message.reply_text("⚠️ Both scores must be 1–10.")
+        return
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "set_score",
+            "key": key, "importance": imp, "credibility": cred,
+        }, timeout=30)
+        result = resp.json()
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Error: {str(e)[:200]}")
+        return
+    if result.get("ok"):
+        await update.message.reply_text(
+            f"✅ Scores updated\n📄 {result.get('title', key)}\n"
+            f"⭐️ Importance {imp}/10   ✅ Credibility {cred}/10\n\n"
+            "Run /toc to refresh the table of contents."
+        )
+    else:
+        await update.message.reply_text(
+            f"⚠️ Could not update: {result.get('error','unknown')}\n\n"
+            "Tip: use the document's exact title, or its ID from the /d/<ID> part of its link."
+        )
+
+
 async def toc_cmd(update, context):
     """/toc — rebuild the table of contents in both index documents."""
     if not is_allowed(update):
@@ -2321,6 +2368,7 @@ def main():
     app.add_handler(CommandHandler("rollback", rollback))
     app.add_handler(CommandHandler("newfolder", newfolder_cmd))
     app.add_handler(CommandHandler("delfolder", delfolder_cmd))
+    app.add_handler(CommandHandler("setscore", setscore_cmd))
     app.add_handler(CommandHandler("toc", toc_cmd))
     app.add_handler(CommandHandler("whoisregistered", whoisregistered_cmd))
     app.add_handler(CommandHandler("testnotify", testnotify_cmd))
