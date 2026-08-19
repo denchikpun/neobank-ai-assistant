@@ -36,6 +36,39 @@ SHARED_DRIVE_FOLDER_ID = os.environ.get("SHARED_DRIVE_FOLDER_ID", "")
 groq_client = Groq(api_key=GROQ_KEY)
 
 
+def drive_api_upload(file_path, file_name, folder_id, mime_type):
+    """Upload a file directly to Drive via the API (no base64/Apps Script).
+    Used for large files. Returns (file_id, web_url, error)."""
+    service, err = get_drive_service()
+    if err:
+        return None, None, err
+    try:
+        from googleapiclient.http import MediaFileUpload
+        media = MediaFileUpload(file_path, mimetype=mime_type or "application/octet-stream",
+                                resumable=True)
+        created = service.files().create(
+            body={"name": file_name, "parents": [folder_id]},
+            media_body=media,
+            fields="id, webViewLink",
+            supportsAllDrives=True,
+        ).execute()
+        return created.get("id"), created.get("webViewLink"), None
+    except Exception as e:
+        return None, None, f"{type(e).__name__}: {str(e)[:200]}"
+
+
+def resolve_folder_id(folder_path):
+    """Ask Apps Script for the Drive ID of a folder path."""
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json={
+            "token": SCRIPT_TOKEN, "action": "resolve_folder", "folder": folder_path
+        }, timeout=15)
+        r = resp.json()
+        return (r.get("folder_id"), None) if r.get("ok") else (None, r.get("error"))
+    except Exception as e:
+        return None, str(e)
+
+
 def get_drive_service():
     """Build a Google Drive API client from the Service Account JSON.
     Returns (service, error). service is None if not configured or failed."""
@@ -673,7 +706,11 @@ MIME_BY_EXT = {
 }
 
 # Apps Script base64 request cap — keep originals under ~30 MB raw
-MAX_ORIGINAL_BYTES = 30 * 1024 * 1024  # ~30 MB — practical ceiling for Apps Script base64 transfer
+MAX_ORIGINAL_BYTES = 30 * 1024 * 1024  # ceiling for the base64/Apps Script path
+# files larger than this use the Drive API directly (no base64) when configured
+DRIVE_API_THRESHOLD = 8 * 1024 * 1024  # 8 MB — above this, prefer Drive API
+# with Drive API available, allow much larger originals
+MAX_DRIVE_API_BYTES = 100 * 1024 * 1024  # 100 MB via direct Drive API
 
 
 def is_structural_file(filename):
@@ -697,13 +734,37 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source,
     if not APPS_SCRIPT_URL:
         return None, None, "Apps Script URL not configured"
     try:
-        import base64
         size = os.path.getsize(file_path)
+        ext = os.path.splitext(file_name)[1].lower()
+        mime = MIME_BY_EXT.get(ext, "application/octet-stream")
+
+        # large file → Drive API direct upload
+        if size > DRIVE_API_THRESHOLD and GOOGLE_SA_JSON:
+            if size > MAX_DRIVE_API_BYTES:
+                return None, None, f"file too large ({size // (1024*1024)} MB > 100 MB)"
+            folder_id, ferr = resolve_folder_id(folder)
+            if not folder_id:
+                return None, None, f"could not resolve folder: {ferr}"
+            stored_name = title if title.lower().endswith(ext) else (title + ext)
+            up_id, up_url, uerr = drive_api_upload(file_path, stored_name, folder_id, mime)
+            if uerr:
+                return None, None, f"Drive API upload failed: {uerr}"
+            # log to changelog via Apps Script (best-effort)
+            try:
+                requests.post(APPS_SCRIPT_URL, json={
+                    "token": SCRIPT_TOKEN, "action": "log_raw",
+                    "title": title, "folder": folder, "file_url": up_url,
+                    "importance": importance, "credibility": credibility,
+                }, timeout=30)
+            except Exception:
+                pass
+            return up_url, up_id, None
+
+        import base64
         if size > MAX_ORIGINAL_BYTES:
             return None, None, f"file too large ({size // (1024*1024)} MB > 30 MB)"
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
-        ext = os.path.splitext(file_name)[1].lower()
         payload = {
             "token": SCRIPT_TOKEN,
             "action": "save_file_only",
@@ -730,25 +791,71 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source,
 
 
 def save_with_original_to_drive(data, source, content, file_path, file_name):
-    """Save the original binary file to Drive plus an analysis doc alongside it."""
+    """Save the original binary file to Drive plus an analysis doc alongside it.
+    Large files go through the Drive API directly (no base64); small files use
+    the existing Apps Script base64 path."""
     if not APPS_SCRIPT_URL:
-        return None, None, None, "Apps Script URL not configured"
+        return None, None, None, None, "Apps Script URL not configured"
+
+    folder = data.get("folder", "Knowledge/Market")
+    ext = os.path.splitext(file_name)[1].lower()
+    mime = MIME_BY_EXT.get(ext, "application/octet-stream")
+    analysis_content = (
+        f"SUMMARY:\n{data.get('summary','')}\n\nKEY INSIGHTS:\n" +
+        "\n".join([f"{i+1}. {t}" for i, t in enumerate(data.get('key_insights', []))]) +
+        f"\n\nEXTRACTED CONTENT:\n{content[:6000]}"
+    )
+    try:
+        size = os.path.getsize(file_path)
+    except Exception:
+        size = 0
+
+    # ---- HYBRID: large file → Drive API direct upload, then register via Apps Script ----
+    if size > DRIVE_API_THRESHOLD and GOOGLE_SA_JSON:
+        if size > MAX_DRIVE_API_BYTES:
+            return None, None, None, None, f"file too large ({size // (1024*1024)} MB > 100 MB)"
+        folder_id, ferr = resolve_folder_id(folder)
+        if not folder_id:
+            return None, None, None, None, f"could not resolve folder for Drive API: {ferr}"
+        up_id, up_url, uerr = drive_api_upload(file_path, file_name, folder_id, mime)
+        if uerr:
+            return None, None, None, None, f"Drive API upload failed: {uerr}"
+        # register the uploaded file (analysis doc + indexes) via Apps Script
+        try:
+            payload = {
+                "token": SCRIPT_TOKEN, "action": "register_uploaded",
+                "title": data.get("title", "Untitled"), "folder": folder,
+                "content": analysis_content, "source": source,
+                "importance": data.get("importance", 5), "credibility": data.get("credibility", 5),
+                "date": data.get("date", datetime.now().strftime("%Y-%m-%d")),
+                "version": data.get("version", "V1.0"), "hashtags": data.get("hashtags", []),
+                "summary": data.get("summary", ""), "key_insights": data.get("key_insights", []),
+                "original_id": up_id, "original_url": up_url, "file_name": file_name,
+            }
+            resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=120)
+            logger.info(f"register_uploaded response [{resp.status_code}]: {resp.text[:400]}")
+            result = resp.json()
+            if result.get("ok"):
+                return (result.get("file_url"), result.get("file_id"),
+                        result.get("original_url") or up_url,
+                        result.get("original_id") or up_id, None)
+            return None, None, None, None, result.get("error", "register failed")
+        except Exception as e:
+            return None, None, None, None, f"register after upload failed: {e}"
+
+    # ---- SMALL file → existing base64 path via Apps Script ----
     try:
         import base64
-        size = os.path.getsize(file_path)
         if size > MAX_ORIGINAL_BYTES:
-            return None, None, None, f"file too large to store original ({size // (1024*1024)} MB > 30 MB)"
+            return None, None, None, None, f"file too large to store original ({size // (1024*1024)} MB > 30 MB)"
         with open(file_path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
-        ext = os.path.splitext(file_name)[1].lower()
         payload = {
             "token": SCRIPT_TOKEN,
             "action": "create_with_file",
             "title": data.get("title", "Untitled"),
-            "folder": data.get("folder", "Knowledge/Market"),
-            "content": f"SUMMARY:\n{data.get('summary','')}\n\nKEY INSIGHTS:\n" +
-                       "\n".join([f"{i+1}. {t}" for i, t in enumerate(data.get('key_insights', []))]) +
-                       f"\n\nEXTRACTED CONTENT:\n{content[:6000]}",
+            "folder": folder,
+            "content": analysis_content,
             "source": source,
             "importance": data.get("importance", 5),
             "credibility": data.get("credibility", 5),
@@ -759,7 +866,7 @@ def save_with_original_to_drive(data, source, content, file_path, file_name):
             "key_insights": data.get("key_insights", []),
             "file_b64": b64,
             "file_name": file_name,
-            "mime_type": MIME_BY_EXT.get(ext, "application/octet-stream"),
+            "mime_type": mime,
         }
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
         logger.info(f"create_with_file response [{resp.status_code}]: {resp.text[:400]}")
