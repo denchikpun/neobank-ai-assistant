@@ -705,6 +705,8 @@ MIME_BY_EXT = {
     ".webp": "image/webp",
 }
 
+# Telegram Bot API hard limit — bots cannot download files larger than 20 MB
+TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
 # Apps Script base64 request cap — keep originals under ~30 MB raw
 MAX_ORIGINAL_BYTES = 30 * 1024 * 1024  # ceiling for the base64/Apps Script path
 # files larger than this use the Drive API directly (no base64) when configured
@@ -1926,6 +1928,13 @@ async def handle_photo(update, context):
         file_id = msg.photo[-1].file_id
         ext = ".jpg"
     else:
+        # image sent as a document — check size (photos compressed by Telegram are always small)
+        if (getattr(msg.document, "file_size", None) or 0) > TELEGRAM_DOWNLOAD_LIMIT:
+            await msg.reply_text(
+                "⚠️ This image is over 20 MB — Telegram won't let me download it. "
+                "Please compress it and resend."
+            )
+            return
         file_id = msg.document.file_id
         ext = os.path.splitext(msg.document.file_name or "img.jpg")[1] or ".jpg"
 
@@ -1967,9 +1976,27 @@ async def receive_message(update, context):
     msg = update.message
     if msg.document or msg.audio:
         f = msg.document or msg.audio
+        # Telegram Bot API cannot download files larger than 20 MB — check up front
+        file_size = getattr(f, "file_size", None) or 0
+        if file_size > TELEGRAM_DOWNLOAD_LIMIT:
+            size_mb = file_size / (1024 * 1024)
+            await msg.reply_text(
+                f"⚠️ This file is {size_mb:.0f} MB. Telegram doesn't allow bots to download "
+                f"files larger than 20 MB, so I can't process it directly.\n\n"
+                f"Please compress it first and send the smaller version:\n"
+                f"👉 https://www.ilovepdf.com/ru/compress_pdf\n\n"
+                f"(For non-PDF files, you can also upload the file to Google Drive manually "
+                f"and send me the link instead.)",
+                disable_web_page_preview=True
+            )
+            return
         context.user_data.update({"pending_source": f"File: {f.file_name}", "pending_type": "file",
                                    "pending_file_id": f.file_id, "pending_file_name": f.file_name})
     elif msg.voice:
+        # voice notes are small, but guard anyway
+        if (getattr(msg.voice, "file_size", None) or 0) > TELEGRAM_DOWNLOAD_LIMIT:
+            await msg.reply_text("⚠️ This voice message is too large for me to download (over 20 MB).")
+            return
         context.user_data.update({"pending_source": "Voice message", "pending_type": "voice",
                                    "pending_file_id": msg.voice.file_id})
     elif msg.text:
