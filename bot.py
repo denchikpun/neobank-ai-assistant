@@ -2316,11 +2316,21 @@ async def button_callback(update, context):
 
         if ptype == "file":
             # download now, keep it, then ask for scores before saving
-            tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
-            ext = os.path.splitext(fname)[1] or ".bin"
-            fd, tmp_path = tempfile.mkstemp(suffix=ext)
-            os.close(fd)
-            await tg_file.download_to_drive(tmp_path)
+            try:
+                await query.message.reply_text("📥 Downloading file...")
+                tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
+                ext = os.path.splitext(fname)[1] or ".bin"
+                fd, tmp_path = tempfile.mkstemp(suffix=ext)
+                os.close(fd)
+                await tg_file.download_to_drive(tmp_path)
+            except Exception as e:
+                await query.message.reply_text(
+                    f"⚠️ Could not download the file: {str(e)[:200]}\n\n"
+                    "If the file is larger than 20 MB, Telegram won't let me download it — "
+                    "please compress it (ilovepdf.com/ru/compress_pdf) and resend."
+                )
+                context.user_data.clear()
+                return
 
             context.user_data["raw_pending"] = {
                 "folder": folder,
