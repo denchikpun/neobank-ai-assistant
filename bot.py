@@ -805,10 +805,17 @@ def save_file_only_to_drive(folder, title, file_path, file_name, source,
         }
         resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=300)
         logger.info(f"save_file_only response [{resp.status_code}]: {resp.text[:300]}")
-        result = resp.json()
+        try:
+            result = resp.json()
+        except Exception:
+            return None, None, f"[{resp.status_code}] non-JSON: {resp.text[:200]}"
         if result.get("ok"):
-            return result.get("file_url"), result.get("file_id"), None
-        return None, None, result.get("error", "Unknown error")
+            url = result.get("file_url")
+            if url:
+                return url, result.get("file_id"), None
+            # ok but no url — surface what came back so we can see the field names
+            return None, None, f"saved but no URL in response: {str(result)[:200]}"
+        return None, None, result.get("error") or f"unknown; raw: {str(result)[:200]}"
     except Exception as e:
         return None, None, str(e)
 
