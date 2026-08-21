@@ -192,12 +192,29 @@ FOLDERS = {
 FOLDERS_TEXT = "\n".join([f"- {k}: {v}" for k, v in FOLDERS.items()])
 
 
-def get_live_folders():
+# cache for the folder list — scanning Drive is slow, and the structure
+# rarely changes, so we hold the result for a short window
+_folder_cache = {"folders": None, "ts": 0.0}
+FOLDER_CACHE_TTL = 300  # seconds (5 min); cleared immediately on folder create/delete
+
+
+def invalidate_folder_cache():
+    _folder_cache["folders"] = None
+    _folder_cache["ts"] = 0.0
+
+
+def get_live_folders(force=False):
     """Return the current folder list: hardcoded seed + any created in Drive.
+    Cached in memory for FOLDER_CACHE_TTL seconds to avoid repeated slow scans.
     Falls back to the hardcoded list if the scan fails."""
+    import time as _time
     base = list(FOLDERS.keys())
     if not APPS_SCRIPT_URL:
         return base
+    # serve from cache if fresh
+    if not force and _folder_cache["folders"] is not None:
+        if (_time.time() - _folder_cache["ts"]) < FOLDER_CACHE_TTL:
+            return _folder_cache["folders"]
     try:
         resp = requests.post(APPS_SCRIPT_URL, json={
             "token": SCRIPT_TOKEN, "action": "list_folders"
@@ -205,12 +222,15 @@ def get_live_folders():
         result = resp.json()
         if result.get("ok"):
             scanned = list(result.get("folders", {}).keys())
-            # union, keep order: seed first, then any new ones
             merged = base + [f for f in scanned if f not in base]
-            return merged or base
+            merged = merged or base
+            _folder_cache["folders"] = merged
+            _folder_cache["ts"] = _time.time()
+            return merged
     except Exception as e:
         logger.info(f"list_folders failed, using hardcoded: {e}")
-    return base
+    # on failure, serve stale cache if we have it, else the seed
+    return _folder_cache["folders"] or base
 
 
 def is_superadmin(update):
@@ -1530,6 +1550,7 @@ async def newfolder_cmd(update, context):
     await update.message.reply_text(f"📁 Creating folder «{name}» in {parent_path}...")
     path, error = create_folder_in_drive(parent_path, name, created_by)
     if path:
+        invalidate_folder_cache()
         await update.message.reply_text(f"✅ Folder created: {path}\nIt's now available when saving.")
         await notify_admins(context, update,
             f"📢 {_display_name(update)} created a folder\n📁 {path}")
@@ -1703,6 +1724,7 @@ async def delfolder_cmd(update, context):
     await update.message.reply_text(f"🗑 Archiving folder {path}...")
     result, error = delete_folder_in_drive(path, requested_by, is_superadmin(update))
     if result:
+        invalidate_folder_cache()
         await update.message.reply_text(
             f"✅ Folder moved to _Archive: {path}\n"
             f"Nothing is deleted — it can be restored from _Archive."
