@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import asyncio
 import logging
 import tempfile
 import requests
@@ -2013,7 +2014,8 @@ async def receive_message(update, context):
             )
             return
         context.user_data.update({"pending_source": f"File: {f.file_name}", "pending_type": "file",
-                                   "pending_file_id": f.file_id, "pending_file_name": f.file_name})
+                                   "pending_file_id": f.file_id, "pending_file_name": f.file_name,
+                                   "pending_file_size": file_size})
     elif msg.voice:
         # voice notes are small, but guard anyway
         if (getattr(msg.voice, "file_size", None) or 0) > TELEGRAM_DOWNLOAD_LIMIT:
@@ -2315,14 +2317,41 @@ async def button_callback(update, context):
             return
 
         if ptype == "file":
+            # guard: Telegram won't let bots download files > 20 MB (get_file hangs)
+            pending_size = context.user_data.get("pending_file_size", 0) or 0
+            if pending_size > TELEGRAM_DOWNLOAD_LIMIT:
+                size_mb = pending_size / (1024 * 1024)
+                await query.message.reply_text(
+                    f"⚠️ This file is {size_mb:.0f} MB. Telegram doesn't allow bots to download "
+                    f"files larger than 20 MB, so I can't save it directly.\n\n"
+                    f"Please compress it and resend:\n"
+                    f"👉 https://www.ilovepdf.com/ru/compress_pdf\n\n"
+                    f"(Or upload it to Google Drive manually and send me the link.)",
+                    disable_web_page_preview=True
+                )
+                context.user_data.clear()
+                return
             # download now, keep it, then ask for scores before saving
             try:
                 await query.message.reply_text("📥 Downloading file...")
-                tg_file = await context.bot.get_file(context.user_data["pending_file_id"])
+                tg_file = await asyncio.wait_for(
+                    context.bot.get_file(context.user_data["pending_file_id"]),
+                    timeout=45,
+                )
                 ext = os.path.splitext(fname)[1] or ".bin"
                 fd, tmp_path = tempfile.mkstemp(suffix=ext)
                 os.close(fd)
-                await tg_file.download_to_drive(tmp_path)
+                await asyncio.wait_for(tg_file.download_to_drive(tmp_path), timeout=90)
+            except asyncio.TimeoutError:
+                await query.message.reply_text(
+                    "⚠️ The download timed out. This usually means the file is too large for "
+                    "Telegram to hand to a bot (the 20 MB limit).\n\n"
+                    "Please compress it and resend:\n"
+                    "👉 https://www.ilovepdf.com/ru/compress_pdf",
+                    disable_web_page_preview=True
+                )
+                context.user_data.clear()
+                return
             except Exception as e:
                 await query.message.reply_text(
                     f"⚠️ Could not download the file: {str(e)[:200]}\n\n"
