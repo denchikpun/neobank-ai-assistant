@@ -1912,7 +1912,7 @@ async def handle_voice(update, context):
         await msg.reply_text(f"⚠️ Couldn't transcribe: {error or 'empty'}")
         return ConversationHandler.END
 
-    await msg.reply_text(f"📝 Transcript:\n_{transcript[:1500]}_", parse_mode="Markdown")
+    await msg.reply_text(f"📝 Transcript:\n{transcript[:1500]}")
     intent = detect_intent(transcript)
 
     if intent == "question":
@@ -2278,8 +2278,8 @@ async def button_callback(update, context):
             leaf = s[len(top) + 1:]
             rows.append([InlineKeyboardButton(f"   └ {leaf}", callback_data=f"{prefix}_{s}")])
         rows.append([InlineKeyboardButton("⬅️ Back", callback_data=("change_folder" if prefix == "folder" else "raw_save"))])
-        await query.edit_message_text(f"📁 *{top}* — choose sub-folder or save at department level:",
-                                       parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+        await query.edit_message_text(f"📁 {top} — choose sub-folder or save at department level:",
+                                       reply_markup=InlineKeyboardMarkup(rows))
 
     elif query.data in ("newfolder_analysis", "newfolder_raw"):
         await query.message.reply_text(
@@ -2369,17 +2369,15 @@ async def button_callback(update, context):
             }
             await query.message.reply_text(
                 f"📁 Folder: {folder}\n\n"
-                "Before saving, set the scores. Send them as two numbers 1–10:\n"
-                "`importance credibility`  — for example  `7 8`\n\n"
-                "Or send `skip` to save without scores.",
-                parse_mode="Markdown"
+                "Before saving, set the scores. Send them as two numbers 1-10:\n"
+                "importance credibility  — for example  7 8\n\n"
+                "Or send 'skip' to save without scores."
             )
             return
 
     elif query.data.startswith("folder_"):
         context.user_data["pending_data"]["folder"] = query.data[7:]
-        await query.edit_message_text(f"📁 Folder: `{query.data[7:]}`\n\nSend `confirm` to save.",
-                                       parse_mode="Markdown")
+        await query.edit_message_text(f"📁 Folder: {query.data[7:]}\n\nSend 'confirm' to save.")
 
 
 async def complete_raw_file_save(update, context, importance, credibility):
